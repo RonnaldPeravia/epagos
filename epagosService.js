@@ -4,10 +4,14 @@ const fs = require('fs');
 const { XMLParser } = require('fast-xml-parser');
 require('dotenv').config();
 
+const rootCA = fs.readFileSync('./BPD-RCA.txt');
+const subordinateCA = fs.readFileSync('./BPD-SCA.txt');
+
 // Configuración del agente HTTPS (sin cambios)
 const httpsAgent = new https.Agent({
     pfx: fs.readFileSync(process.env.PFX_CERT_PATH),
     passphrase: process.env.PFX_CERT_PASSPHRASE,
+    ca: [rootCA, subordinateCA]
 });
 
 // Clientes API (sin cambios)
