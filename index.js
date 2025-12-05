@@ -38,13 +38,13 @@ app.get('/', (req, res) => {
 // Endpoint para forzar la ejecución manual del worker (útil para testing)
 app.post('/api/trigger-sync', async (req, res) => {
     if (isProcessing) return res.status(409).json({ message: 'Proceso ya en ejecución' });
-    
+
     // Ejecutar sin await para no bloquear response, o con await si queremos ver log
     isProcessing = true;
     processPendingPayments().then(() => {
         isProcessing = false;
     });
-    
+
     res.json({ message: 'Sincronización iniciada manualmente.' });
 });
 
@@ -54,19 +54,19 @@ app.post('/api/trigger-sync', async (req, res) => {
  */
 app.post('/api/beneficiaries', async (req, res) => {
     try {
-        const beneficiaryInfo = req.body;
-        // Aquí podrías añadir validaciones del cuerpo de la solicitud
-        const result = await createBeneficiary(beneficiaryInfo);
+        const result = await createBeneficiary(req.body);
 
-        // Si el beneficiario ya existía, devolvemos un 200 OK con el mensaje.
         if (result.status === 'exists') {
-            return res.status(200).json({ message: result.message });
+            return res.status(200).json({ success: true, message: result.message });
         }
 
-        // Si se creó una nueva relación, devolvemos 201 Created.
-        res.status(201).json({ message: "Beneficiario creado/vinculado exitosamente.", data: result });
+        res.status(201).json(result);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({
+            success: false,
+            message: "Fallo al procesar el beneficiario.",
+            details: error.message
+        });
     }
 });
 
@@ -75,15 +75,14 @@ app.post('/api/beneficiaries', async (req, res) => {
  */
 app.post('/api/payments', async (req, res) => {
     try {
-        const paymentPayload = req.body;
-        if (!paymentPayload || !paymentPayload.OrderItems?.length) {
-            return res.status(400).json({ error: 'Payload de pago inválido.' });
-        }
-        const result = await createPaymentOrder(paymentPayload);
-        const orderNumber = result.entry?.content['m:properties']['d:OrderNr'];
-        res.status(201).json({ message: "Orden de pago creada exitosamente.", orderNumber: orderNumber, data: result });
+        const result = await createPaymentOrder(req.body);
+        res.status(201).json(result);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({
+            success: false,
+            message: "Fallo al procesar la orden de pago.",
+            details: error.message
+        });
     }
 });
 

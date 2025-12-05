@@ -11,7 +11,8 @@ const subordinateCA = fs.readFileSync('./BPD-SCA.txt');
 const httpsAgent = new https.Agent({
     pfx: fs.readFileSync(process.env.PFX_CERT_PATH),
     passphrase: process.env.PFX_CERT_PASSPHRASE,
-    ca: [rootCA, subordinateCA]
+    ca: [rootCA, subordinateCA],
+    rejectUnauthorized: false
 });
 
 // Clientes API (sin cambios)
@@ -19,11 +20,13 @@ const wsdmzClient = axios.create({
     baseURL: process.env.EPAGOS_QA_URL_WSDMZ,
     httpsAgent,
     auth: { username: process.env.EPAGOS_USERNAME, password: process.env.EPAGOS_PASSWORD },
+    timeout: 30000
 });
 const commonClient = axios.create({
     baseURL: process.env.EPAGOS_QA_URL_COMMON,
     httpsAgent,
     auth: { username: process.env.EPAGOS_USERNAME, password: process.env.EPAGOS_PASSWORD },
+    timeout: 30000
 });
 
 const xmlParser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "" });
@@ -95,7 +98,29 @@ async function checkBeneficiaryRelationship(companyId, beneficiaryId, authHeader
 }
 
 /**
- * CAMBIO: Ahora acepta el token CSRF como parámetro en lugar de obtenerlo.
+ * Parsea una respuesta de error XML de SAP y la convierte en un mensaje legible.
+ */
+function parseSapError(errorData) {
+    try {
+        const parsedError = xmlParser.parse(errorData);
+        let detailedErrorMessage = "La API de ePagos devolvió los siguientes errores:\n";
+        const mainMessage = parsedError.error?.message?.value || "Error general al procesar la solicitud.";
+        detailedErrorMessage += `- Mensaje Principal: ${mainMessage}\n`;
+        const errorDetails = parsedError.error?.innererror?.errordetails?.errordetail;
+        if (errorDetails) {
+            const details = Array.isArray(errorDetails) ? errorDetails : [errorDetails];
+            details.forEach((detail, index) => {
+                detailedErrorMessage += `  - Detalle ${index + 1}: [${detail.severity}] ${detail.message} (Código: ${detail.code})\n`;
+            });
+        }
+        return detailedErrorMessage;
+    } catch (parseError) {
+        return `La respuesta del servidor no fue un XML de error válido. Contenido: ${errorData}`;
+    }
+}
+
+/**
+ * Función interna para crear la relación del beneficiario
  */
 async function addBeneficiaryToCompany(beneficiaryPayload, authHeaders) {
     try {
@@ -107,10 +132,22 @@ async function addBeneficiaryToCompany(beneficiaryPayload, authHeaders) {
                 'Content-Type': 'application/json'
             }
         });
-        return xmlParser.parse(response.data);
+
+        // --- Manejo detallado de la respuesta de ÉXITO ---
+        const parsedData = xmlParser.parse(response.data);
+        const properties = parsedData.entry?.content['m:properties'];
+        return {
+            success: true,
+            message: "Beneficiario vinculado exitosamente.",
+            details: {
+                companyId: properties['d:BusinessPartner1Id'],
+                beneficiaryId: properties['d:BusinessPartner2Id'],
+                relationshipType: properties['d:RelationshipTypeId']
+            }
+        };
+
     } catch (error) {
-        console.error("Error al añadir beneficiario:", error.response?.data);
-        throw new Error("Fallo al crear la relación del beneficiario.");
+        throw new Error(parseSapError(error.response?.data));
     }
 }
 
@@ -160,8 +197,8 @@ module.exports = {
     },
 
     /**
-     * Se mantiene igual, ya que siempre obtenía el token de todas formas.
-     */
+       * Crea una orden de pago y maneja la respuesta detallada
+       */
     createPaymentOrder: async (paymentPayload) => {
         try {
             const authHeaders = await getCsrfToken();
@@ -173,10 +210,41 @@ module.exports = {
                     'Content-Type': 'application/json'
                 }
             });
-            return xmlParser.parse(response.data);
+
+            // --- Manejo detallado de la respuesta de ÉXITO ---
+            const parsedData = xmlParser.parse(response.data);
+            const orderProperties = parsedData.entry?.content['m:properties'];
+            const items = parsedData.entry?.feed?.entry;
+
+            const processedItems = [];
+            if (items) {
+                const itemList = Array.isArray(items) ? items : [items];
+                itemList.forEach(item => {
+                    const itemProps = item.content['m:properties'];
+                    processedItems.push({
+                        lineNumber: itemProps['d:LineNr'],
+                        payeeId: itemProps['d:PayeeId'],
+                        reference: itemProps['d:Reference'],
+                        netAmount: itemProps['d:NetAmount'],
+                        currency: itemProps['d:CurrencyId']
+                    });
+                });
+            }
+
+            return {
+                success: true,
+                message: "Orden de pago aceptada para procesamiento.",
+                details: {
+                    orderNumber: orderProperties['d:OrderNr'],
+                    status: orderProperties['d:StatusName'],
+                    totalAmount: orderProperties['d:NetAmountTotal'],
+                    processedItems: processedItems
+                }
+            };
+
         } catch (error) {
-            console.error("Error al crear orden de pago:", error.response?.data);
-            throw new Error("Fallo al crear la orden de pago.");
+            // Lanzamos el error ya formateado por nuestra función de utilidad
+            throw new Error(parseSapError(error.response?.data));
         }
     }
 };
