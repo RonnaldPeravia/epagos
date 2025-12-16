@@ -48,25 +48,62 @@ app.post('/api/trigger-sync', async (req, res) => {
     res.json({ message: 'Sincronización iniciada manualmente.' });
 });
 
+// Función de utilidad para esperar
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 /**
  * Endpoint para crear un nuevo beneficiario.
  * Sigue el flujo completo de 3 pasos.
  */
 app.post('/api/beneficiaries', async (req, res) => {
     try {
-        const result = await createBeneficiary(req.body);
+        const beneficiaryInfo = req.body;
 
-        if (result.status === 'exists') {
-            return res.status(200).json({ success: true, message: result.message });
+        // Paso 1: Intentamos la creación. ESPERAMOS que pueda fallar con el error 'undefined'.
+        try {
+            // No necesitamos el resultado aquí, es solo para iniciar el proceso
+            await createBeneficiary(beneficiaryInfo);
+        } catch (error) {
+            // Si el error es el que esperamos, lo ignoramos y continuamos.
+            if (error.message.includes("Contenido: undefined")) {
+                console.log("Se inició la creación asíncrona. Se procederá a verificar...");
+            } else {
+                // Si es otro error, sí lo lanzamos.
+                throw error;
+            }
         }
 
-        res.status(201).json(result);
+        // Paso 2: Sondeo (Polling). Esperamos un poco y empezamos a verificar.
+        let isCreated = false;
+        const maxRetries = 5; // Intentar 5 veces
+        const retryDelay = 10000; // Esperar 10 segundos entre intentos
+
+        for (let i = 0; i < maxRetries; i++) {
+            console.log(`Intento de verificación #${i + 1}...`);
+            await delay(retryDelay); // Esperar
+
+            // Usamos la función de verificación que ya tenemos
+            const relationshipExists = await checkBeneficiaryRelationshipExists(
+                process.env.BUSINESS_PARTNER_1_ID,
+                beneficiaryInfo.identityType,
+                beneficiaryInfo.identityNumber
+            );
+
+            if (relationshipExists) {
+                isCreated = true;
+                break; // Si se encuentra, salimos del bucle
+            }
+        }
+
+        // Paso 3: Devolver la respuesta final
+        if (isCreated) {
+            res.status(201).json({ success: true, message: "Beneficiario creado y verificado exitosamente." });
+        } else {
+            res.status(500).json({ success: false, message: "Se solicitó la creación del beneficiario, pero no se pudo verificar su estado final después de varios intentos." });
+        }
+
     } catch (error) {
-        res.status(500).json({
-            success: false,
-            message: "Fallo al procesar el beneficiario.",
-            details: error.message
-        });
+        res.status(500).json({ success: false, message: "Fallo al procesar el beneficiario.", details: error.message });
     }
 });
 
