@@ -3,8 +3,8 @@ const https = require('https');
 require('dotenv').config();
 
 // Agente para ignorar errores de certificado auto-firmados en SAP (común en entornos on-premise)
-const sapAgent = new https.Agent({  
-    rejectUnauthorized: false 
+const sapAgent = new https.Agent({
+    rejectUnauthorized: false
 });
 
 const sapClient = axios.create({
@@ -26,7 +26,7 @@ const sapService = {
                 UserName: process.env.SBO_USER,
                 Password: process.env.SBO_PASSWORD
             });
-            
+
             // Guardar cookies de sesión (B1SESSION, ROUTEID)
             sessionCookie = response.headers['set-cookie'];
             sapClient.defaults.headers.Cookie = sessionCookie;
@@ -59,10 +59,10 @@ const sapService = {
     getPendingPayments: async () => {
         try {
             // Filtro: TrackID vacío Y Status vacío o nulo
-            const filter = "BPD_OrderNumber eq null"; 
+            const filter = "DocNum eq 5669";
             // Seleccionar solo campos necesarios para optimizar
-            const select = "DocEntry,DocNum,CardCode,CardName,DocCurrency,TransferSum,TransferReference,Comments,U_BPD_Status";
-            
+            const select = "DocEntry,DocNum,CardCode,CardName,DocCurrency,TransferSum,TransferReference, U_BPD_OrderNumber, U_BPD_status, U_BPD_message, U_BPD_success, U_BPD_details";
+
             const response = await sapClient.get(`/VendorPayments?$filter=${filter}&$select=${select}`);
             return response.data.value;
         } catch (error) {
@@ -74,15 +74,41 @@ const sapService = {
     /**
      * Obtiene datos extendidos del Socio de Negocio (Banco, Cuenta, Identificación, Status Sync)
      */
+    /**
+     * Obtiene datos del Socio de Negocio y su primera cuenta bancaria.
+     */
     getBusinessPartner: async (cardCode) => {
         try {
-            // Se asume que el proveedor tiene configurado el banco por defecto en la pestaña de condiciones de pago o bancos
-            // Ojo: Se solicitan campos UDF de Sync y campos nativos de identificación
-            const select = "CardCode,CardName,U_BPD_Synced,U_TipoIdentificacion,LicTradNum,BankCode,AccountNo";
-            const response = await sapClient.get(`/BusinessPartners('${cardCode}')?$select=${select}`);
-            return response.data;
+            // --- 1. Obtener datos generales del BP (sin cambios) ---
+            const bpSelect = "CardCode,CardName,U_BPD_Synced,FederalTaxID";
+            const bpResponse = await sapClient.get(`/BusinessPartners('${cardCode}')?$select=${bpSelect}`);
+            const businessPartnerData = bpResponse.data;
+
+            // --- 2. Obtener la información de las cuentas bancarias (sin cambios en la llamada) ---
+            const bankResponse = await sapClient.get(`/BusinessPartners('${cardCode}')/BPBankAccounts`);
+
+            // --- CORRECCIÓN CRÍTICA: Leemos desde 'bankResponse.data.BPBankAccounts' ---
+            const bankAccountsArray = bankResponse.data.BPBankAccounts;
+
+            if (!bankAccountsArray || bankAccountsArray.length === 0) {
+                throw new Error(`El proveedor ${cardCode} no tiene NINGUNA cuenta bancaria configurada en la pestaña 'Bancos' de SAP.`);
+            }
+
+            // Tomamos el primer elemento del array correcto
+            const firstBankAccount = bankAccountsArray[0];
+
+            console.log('firstBankAccount: ', firstBankAccount)
+
+            // --- 3. Combinamos los resultados en un solo objeto (sin cambios) ---
+            return {
+                ...businessPartnerData,
+                BankCode: firstBankAccount.BankCode,
+                AccountNo: firstBankAccount.AccountNo,
+                AccountTypeControlKey: firstBankAccount.ControlKey
+            };
+
         } catch (error) {
-            console.error(`Error obteniendo BP ${cardCode}:`, error.response?.data);
+            console.error(`Error obteniendo datos completos de BP ${cardCode}:`, error.response?.data || error.message);
             throw error;
         }
     },
@@ -105,7 +131,7 @@ const sapService = {
      */
     updatePaymentStatus: async (docEntry, updateData) => {
         try {
-            // updateData espera: { U_BPD_Status, U_BPD_TrackID, U_BPD_ErrDesc, U_BPD_SyncDate }
+            // updateData espera: { U_BPD_status, U_BPD_OrderNumber, U_BPD_message, U_BPD_SyncDate }
             await sapClient.patch(`/VendorPayments(${docEntry})`, updateData);
             console.log(`📝 Pago ${docEntry} actualizado en SAP.`);
         } catch (error) {

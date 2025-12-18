@@ -1,32 +1,32 @@
 const sapService = require('./sapService');
 const epagosService = require('./epagosService');
 
-// Mapa de conversión de códigos de banco (Ejemplo)
-// Clave: Código en SAP -> Valor: Código en BPD
-// Ajustar según la tabla de códigos del PDF (Pág 12)
+// Mapa de conversiï¿½n de cï¿½digos de banco (Ejemplo)
+// Clave: Cï¿½digo en SAP -> Valor: Cï¿½digo en BPD
+// Ajustar segï¿½n la tabla de cï¿½digos del PDF (Pï¿½g 12)
 const BANK_CODES_MAP = {
-    'BPD': '10101070',    // Banco Popular
-    'BHD': '10101230',    // Banco BHD
-    'RESERVAS': '10101010', // Banreservas
-    // ... agregar los demás necesarios
+    '101010708': '10101070', // Banco Popular
+    '101012308': '10101230', // Banco BHD
+    '101010106': '10101010', // Banreservas
+    '101013404': '10101340', // Santa Cruz
 };
 
-// Función auxiliar para formatear fechas a ISO sin milisegundos
+// Funciï¿½n auxiliar para formatear fechas a ISO sin milisegundos
 const getCurrentISODate = () => new Date().toISOString().split('.')[0] + 'Z';
 
 /**
- * Función principal de procesamiento
+ * Funciï¿½n principal de procesamiento
  */
 async function processPendingPayments() {
     console.log(`\n--- Iniciando Ciclo de Procesamiento: ${new Date().toLocaleTimeString()} ---`);
-    
+
     try {
         // 1. Login en SAP
         await sapService.login();
 
         // 2. Obtener Pagos Pendientes
         const payments = await sapService.getPendingPayments();
-        
+
         if (payments.length === 0) {
             console.log('No hay pagos pendientes para procesar.');
             return;
@@ -42,61 +42,102 @@ async function processPendingPayments() {
                 // 3.1 Obtener detalles del Proveedor (Cuenta Bancaria, RNC, Flag Sync)
                 const bp = await sapService.getBusinessPartner(payment.CardCode);
 
-                // Validaciones previas de datos maestros mínimos
-                if (!bp.LicTradNum || !bp.BankCode || !bp.AccountNo) {
+                console.log('bp: ', bp)
+
+                // Validaciones previas de datos maestros mï¿½nimos
+                if (!bp.FederalTaxID || !bp.BankCode || !bp.AccountNo) {
                     throw new Error("Datos maestros incompletos (Falta RNC, Banco o Cuenta).");
                 }
 
                 // 3.2 Verificar/Crear Beneficiario
                 if (bp.U_BPD_Synced !== 'Y') {
-                    console.log(`   El proveedor ${bp.CardCode} no está sincronizado. Iniciando validación...`);
-                    
-                    // Determinar tipo documento (Mapeo simple, mejorar según lógica real de SAP)
-                    // Asumimos: Si len=9 es RNC (1), si len=11 es Cedula (2). O usar UDF U_TipoIdentificacion
-                    let idType = 'RNC'; // Por defecto
-                    const cleanId = bp.LicTradNum.replace(/[^0-9]/g, ''); // Solo números
-                    
-                    if (bp.U_TipoIdentificacion == '2' || cleanId.length === 11) idType = 'DOCE'; // Cédula
-                    else if (bp.U_TipoIdentificacion == '3') idType = 'DOPS'; // Pasaporte
-                    else idType = 'DORN'; // RNC
+                    console.log(`   El proveedor ${bp.CardCode} no estÃ¡ sincronizado. Iniciando validaciÃ³n...`);
 
-                    // Llamada al servicio de beneficiarios
-                    const benefResult = await epagosService.createBeneficiary({
-                        identityType: idType,
-                        identityNumber: cleanId,
-                        name: bp.CardName.substring(0, 40) // El banco limita a 40 chars a veces
-                    });
+                    const bankCodeBPD = BANK_CODES_MAP[bp.BankCode];
 
-                    // Si no hubo error, marcamos como sincronizado en SAP
+                    if (!bankCodeBPD) {
+                        throw new Error(`El cÃ³digo de banco '${bp.BankCode}' del proveedor no tiene un mapeo definido en BANK_CODES_MAP.`);
+                    }
+
+                    const beneficiaryInfo = {
+                        identityType: (bp.FederalTaxID.length === 11) ? "DOCE" : "DORN",
+                        identityNumber: bp.FederalTaxID.replace(/[^0-9]/g, ''),
+                        name: bp.CardName.substring(0, 40),
+                        bankId: bankCodeBPD,
+                        accountType: "20", // Asumimos '20' (Corriente) por defecto. Ajustar si es necesario.
+                        accountNumber: bp.AccountNo.replace(/[^0-9]/g, ''),
+                        methodId: bankCodeBPD === '10101070' ? 'D' : 'A' // 'D' para BPD, 'A' para otros (ACH)
+                    };
+
+                    // Paso 1: Intentamos la creaciÃ³n, esperando que pueda fallar con respuesta vacÃ­a
+                    try {
+                        await epagosService.createBeneficiary(beneficiaryInfo);
+                    } catch (error) {
+                        if (error.message.includes("Contenido: undefined") || error.message.includes("read ECONNRESET")) {
+                            console.log("   Se iniciÃ³ la creaciÃ³n asÃ­ncrona del beneficiario. Verificando...");
+                        } else {
+                            // Si es un error real (ej. 401), lanzamos el error para que el pago falle.
+                            throw new Error(`Error real al crear beneficiario: ${error.message}`);
+                        }
+                    }
+
+                    // Paso 2: Sondeo para verificar si realmente se creÃ³
+                    let isCreated = false;
+                    const maxRetries = 3;
+                    const retryDelay = 10000; // 10 segundos
+
+                    for (let i = 0; i < maxRetries; i++) {
+                        await new Promise(resolve => setTimeout(resolve, retryDelay)); // Esperar
+
+                        const relationshipExists = await epagosService.checkBeneficiaryRelationshipExists(
+                            process.env.BUSINESS_PARTNER_1_ID,
+                            beneficiaryInfo.identityType,
+                            beneficiaryInfo.identityNumber
+                        );
+
+                        if (relationshipExists) {
+                            isCreated = true;
+                            break;
+                        }
+                    }
+
+                    if (!isCreated) {
+                        throw new Error("No se pudo verificar la creaciÃ³n del beneficiario despuÃ©s de varios intentos.");
+                    }
+
+                    // Si la verificaciÃ³n fue exitosa, marcamos como sincronizado en SAP
                     await sapService.updateBPSyncStatus(bp.CardCode, 'Y');
-                    console.log(`   Proveedor sincronizado correctamente.`);
+                    console.log(`   Proveedor sincronizado y verificado correctamente.`);
+
                 }
 
                 // 3.3 Preparar Payload para la Orden de Pago
                 const bankCodeBPD = BANK_CODES_MAP[bp.BankCode] || '0000'; // Fallback si no existe mapeo
-                
+
                 // Limpieza de datos
                 const cleanAccount = bp.AccountNo.replace(/[^0-9]/g, '');
                 const currency = payment.DocCurrency === 'RD$' ? 'DOP' : payment.DocCurrency;
-                
-                // Estructura según PDF Pág 13 y 22
+
+                // Estructura segï¿½n PDF Pï¿½g 13 y 22
                 const paymentPayload = {
                     "OrderItems": [
                         {
                             "Payee": {
-                                "IdentityTypeId": (bp.U_TipoIdentificacion == '2' || bp.LicTradNum.length === 11) ? "DOCE" : "DORN",
-                                "IdentityNr": bp.LicTradNum.replace(/[^0-9]/g, ''),
+                                "IdentityTypeId": (bp.FederalTaxID.length === 11) ? "DOCE" : "DORN",
+                                "IdentityNr": bp.FederalTaxID.replace(/[^0-9]/g, ''),
                                 "Name1": bp.CardName.substring(0, 49)
                             },
                             "CurrencyId": currency,
                             "NetAmount": payment.TransferSum.toFixed(2),
-                            "BankAccountToKey": bankCodeBPD, 
-                            "BankAccountNr": cleanAccount,
+                            // "BankAccountToKey": bankCodeBPD,
+                            // "BankAccountNr": cleanAccount,
+                            "BankAccountToKey": "0001",
+                            "BankAccountFromKey": "0001", // Asumiendo que la empresa tambiÃ©n usa su primera cuenta
                             "Reference": (payment.TransferReference || `Pago SAP ${payment.DocNum}`).substring(0, 18),
                             "Memo": (payment.Comments || '').substring(0, 49),
                             // PaymentMethodId: 'D' (Transferencia BPD), 'L' (LBTR), 'A' (ACH)
-                            // Lógica simple: Si banco es BPD (10101070) es 'D', sino es interbancario (ACH/LBTR)
-                            "PaymentMethodId": bankCodeBPD === '10101070' ? 'D' : 'A' 
+                            // Lï¿½gica simple: Si banco es BPD (10101070) es 'D', sino es interbancario (ACH/LBTR)
+                            "PaymentMethodId": bankCodeBPD === '10101070' ? 'D' : 'A'
                         }
                     ]
                 };
@@ -104,24 +145,24 @@ async function processPendingPayments() {
                 // 3.4 Enviar Orden de Pago
                 console.log('   Enviando orden al banco...');
                 const orderResult = await epagosService.createPaymentOrder(paymentPayload);
-                
-                // Extraer número de orden del XML parseado
-                // Nota: Ajustar ruta según la respuesta real exacta del parser
+
+                // Extraer nï¿½mero de orden del XML parseado
+                // Nota: Ajustar ruta segï¿½n la respuesta real exacta del parser
                 const orderNr = orderResult.entry?.content?.['m:properties']?.['d:OrderNr'];
 
                 if (!orderNr) {
-                    throw new Error("El banco no devolvió un número de Orden (OrderNr).");
+                    throw new Error("El banco no devolviï¿½ un nï¿½mero de Orden (OrderNr).");
                 }
 
-                // 3.5 Actualizar SAP (ÉXITO)
+                // 3.5 Actualizar SAP (ï¿½XITO)
                 await sapService.updatePaymentStatus(payment.DocEntry, {
-                    "U_BPD_Status": "PROCESADO",
-                    "U_BPD_TrackID": orderNr,
-                    "U_BPD_ErrDesc": "",
+                    "U_BPD_status": "PROCESADO",
+                    "U_BPD_OrderNumber": orderNr,
+                    "U_BPD_message": "",
                     "U_BPD_SyncDate": getCurrentISODate()
                 });
-                
-                console.log(`   ? ÉXITO. Orden Generada: ${orderNr}`);
+
+                console.log(`   ? ï¿½XITO. Orden Generada: ${orderNr}`);
 
             } catch (innerError) {
                 // 3.6 Manejo de Errores Individual (Para no detener el bucle)
@@ -129,18 +170,18 @@ async function processPendingPayments() {
 
                 // Generar ID de error para sacar del pool de pendientes
                 const errorId = `ERR-${Date.now().toString().substring(6)}`;
-                
+
                 await sapService.updatePaymentStatus(payment.DocEntry, {
-                    "U_BPD_Status": "ERROR",
-                    "U_BPD_TrackID": errorId, 
-                    "U_BPD_ErrDesc": innerError.message.substring(0, 250), // Limite SAP campo texto
+                    "U_BPD_status": "ERROR",
+                    "U_BPD_OrderNumber": errorId,
+                    "U_BPD_message": innerError.message.substring(0, 254), // Limite SAP campo texto
                     "U_BPD_SyncDate": getCurrentISODate()
                 });
             }
         }
 
     } catch (error) {
-        console.error('Error Crítico en el Worker:', error);
+        console.error('Error Crï¿½tico en el Worker:', error);
     } finally {
         // 4. Logout SAP
         await sapService.logout();

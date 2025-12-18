@@ -1,6 +1,6 @@
 const express = require('express');
 const cron = require('node-cron');
-const { createBeneficiary, createPaymentOrder } = require('./epagosService');
+const { createBeneficiary, createPaymentOrder, checkBeneficiaryRelationshipExists } = require('./epagosService');
 const { processPendingPayments } = require('./paymentWorker');
 require('dotenv').config();
 
@@ -14,7 +14,7 @@ let isProcessing = false;
 
 // --- CRON JOB ---
 // Se ejecuta cada 5 minutos
-cron.schedule('*/5 * * * *', async () => {
+cron.schedule('*/30 10 * * * *', async () => {
     if (isProcessing) {
         console.log('⚠️ El ciclo anterior aún está corriendo. Saltando ejecución.');
         return;
@@ -58,48 +58,63 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 app.post('/api/beneficiaries', async (req, res) => {
     try {
         const beneficiaryInfo = req.body;
+        const companyId = process.env.BUSINESS_PARTNER_1_ID;
 
-        // Paso 1: Intentamos la creación. ESPERAMOS que pueda fallar con el error 'undefined'.
+        // --- PASO 1: VERIFICAR PRIMERO ---
+        console.log("Verificando si el beneficiario ya existe...");
+        const alreadyExists = await checkBeneficiaryRelationshipExists(
+            companyId,
+            beneficiaryInfo.identityType,
+            beneficiaryInfo.identityNumber
+        );
+
+        // --- PASO 2: MANEJAR EL CASO "YA EXISTE" ---
+        if (alreadyExists) {
+            console.log("Respuesta: El beneficiario ya existe. Finalizando.");
+            // Devolvemos 200 OK, no 201 Created.
+            return res.status(200).json({ success: true, message: "El beneficiario ya existe y está vinculado a la empresa." });
+        }
+
+        // --- PASO 3: INTENTAR LA CREACIÓN ASÍNCRONA ---
+        // Si llegamos aquí, el beneficiario no existe.
         try {
-            // No necesitamos el resultado aquí, es solo para iniciar el proceso
+            // Llamamos a la función simplificada que solo hace el POST.
             await createBeneficiary(beneficiaryInfo);
         } catch (error) {
-            // Si el error es el que esperamos, lo ignoramos y continuamos.
-            if (error.message.includes("Contenido: undefined")) {
+            if (error.message.includes("Contenido: undefined") || error.message.includes("read ECONNRESET")) {
                 console.log("Se inició la creación asíncrona. Se procederá a verificar...");
             } else {
-                // Si es otro error, sí lo lanzamos.
+                // Si es un error real, lo lanzamos.
                 throw error;
             }
         }
 
-        // Paso 2: Sondeo (Polling). Esperamos un poco y empezamos a verificar.
+        // --- PASO 4: SONDEO (POLLING) PARA VERIFICAR LA CREACIÓN ---
         let isCreated = false;
-        const maxRetries = 5; // Intentar 5 veces
-        const retryDelay = 10000; // Esperar 10 segundos entre intentos
+        const maxRetries = 5;
+        const retryDelay = 10000;
 
         for (let i = 0; i < maxRetries; i++) {
-            console.log(`Intento de verificación #${i + 1}...`);
-            await delay(retryDelay); // Esperar
+            console.log(`Intento de verificación #${i + 1} de ${maxRetries}...`);
+            await delay(retryDelay);
 
-            // Usamos la función de verificación que ya tenemos
             const relationshipExists = await checkBeneficiaryRelationshipExists(
-                process.env.BUSINESS_PARTNER_1_ID,
+                companyId,
                 beneficiaryInfo.identityType,
                 beneficiaryInfo.identityNumber
             );
 
             if (relationshipExists) {
                 isCreated = true;
-                break; // Si se encuentra, salimos del bucle
+                break;
             }
         }
 
-        // Paso 3: Devolver la respuesta final
+        // --- PASO 5: DEVOLVER RESPUESTA FINAL ---
         if (isCreated) {
             res.status(201).json({ success: true, message: "Beneficiario creado y verificado exitosamente." });
         } else {
-            res.status(500).json({ success: false, message: "Se solicitó la creación del beneficiario, pero no se pudo verificar su estado final después de varios intentos." });
+            res.status(504).json({ success: false, message: "Se solicitó la creación, pero no se pudo verificar su estado final." });
         }
 
     } catch (error) {
@@ -125,5 +140,5 @@ app.post('/api/payments', async (req, res) => {
 
 app.listen(PORT, () => {
     console.log(`Servidor escuchando en el puerto ${PORT}`);
-    console.log(`Cron Job programado: */5 * * * *`);
+    // console.log(`Cron Job programado: */30 * * * * *`);
 });

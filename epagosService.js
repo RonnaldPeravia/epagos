@@ -54,6 +54,7 @@ async function getCsrfToken() {
  * CAMBIO: Ahora acepta y usa el token CSRF para la petición GET.
  */
 async function findGlobalBeneficiary(identityType, identityNumber, authHeaders) {
+    console.log('findGlobalBeneficiary: ', { "identityType": identityType, "identityNumber": identityNumber, "authHeaders": authHeaders })
     try {
         const url = `/FindBusinessPartnerByIdentity?IdentityTypeId='${identityType}'&IdentityNr='${identityNumber}'`;
         const response = await commonClient.get(url, {
@@ -80,6 +81,7 @@ async function findGlobalBeneficiary(identityType, identityNumber, authHeaders) 
  * CAMBIO: Ahora acepta y usa el token CSRF para la petición GET.
  */
 async function checkBeneficiaryRelationship(companyId, beneficiaryId, authHeaders) {
+    console.log('checkBeneficiaryRelationship: ', { "companyId": companyId, "beneficiaryId": beneficiaryId, "authHeaders": authHeaders })
     try {
         const url = `/Relationships(BusinessPartner1Id='${companyId}',BusinessPartner2Id='${beneficiaryId}',RelationshipTypeId='ZBUBA6')`;
         await wsdmzClient.get(url, {
@@ -101,19 +103,35 @@ async function checkBeneficiaryRelationship(companyId, beneficiaryId, authHeader
  * Parsea una respuesta de error XML de SAP y la convierte en un mensaje legible.
  */
 function parseSapError(errorData) {
+    if (!errorData) {
+        return "La respuesta del servidor no tuvo contenido (posible timeout o cierre de conexión).";
+    }
+
     try {
+        // 1. Parsea el XML a un objeto JavaScript
         const parsedError = xmlParser.parse(errorData);
-        let detailedErrorMessage = "La API de ePagos devolvió los siguientes errores:\n";
+
+        // 2. Extrae el mensaje principal de forma segura
         const mainMessage = parsedError.error?.message?.value || "Error general al procesar la solicitud.";
-        detailedErrorMessage += `- Mensaje Principal: ${mainMessage}\n`;
-        const errorDetails = parsedError.error?.innererror?.errordetails?.errordetail;
-        if (errorDetails) {
-            const details = Array.isArray(errorDetails) ? errorDetails : [errorDetails];
+        let detailedErrorMessage = `La API de ePagos devolvió los siguientes errores:\n- Mensaje Principal: ${mainMessage}\n`;
+
+        // 3. Navega de forma segura hasta el array de detalles
+        const errorDetailsArray = parsedError.error?.innererror?.errordetails?.errordetail;
+        
+        if (errorDetailsArray) {
+            // 4. Normaliza a un array (si es un solo objeto, lo convierte en un array de 1 elemento)
+            const details = Array.isArray(errorDetailsArray) ? errorDetailsArray : [errorDetailsArray];
+            
+            // 5. Itera y formatea cada detalle
             details.forEach((detail, index) => {
-                detailedErrorMessage += `  - Detalle ${index + 1}: [${detail.severity}] ${detail.message} (Código: ${detail.code})\n`;
+                if (detail && detail.message) { // Asegurarse de que el objeto de detalle es válido
+                    detailedErrorMessage += `  - Detalle ${index + 1}: [${detail.severity || 'info'}] ${detail.message} (Código: ${detail.code || 'N/A'})\n`;
+                }
             });
         }
+        
         return detailedErrorMessage;
+
     } catch (parseError) {
         return `La respuesta del servidor no fue un XML de error válido. Contenido: ${errorData}`;
     }
@@ -151,6 +169,19 @@ async function addBeneficiaryToCompany(beneficiaryPayload, authHeaders) {
     }
 }
 
+async function checkBeneficiaryRelationshipExists(companyId, identityType, identityNumber) {
+    console.log('checkBeneficiaryRelationshipExists >', { "companyId": companyId, "identityType": identityType, "identityNumber": identityNumber })
+    try {
+        const authHeaders = await getCsrfToken();
+        const beneficiaryId = await findGlobalBeneficiary(identityType, identityNumber, authHeaders);
+        if (!beneficiaryId) return false;
+        return await checkBeneficiaryRelationship(companyId, beneficiaryId, authHeaders);
+    } catch (error) {
+        console.error("Error durante la verificación de existencia de la relación:", error.message);
+        return false;
+    }
+}
+
 // --- FUNCIONES EXPORTADAS ---
 
 module.exports = {
@@ -158,25 +189,15 @@ module.exports = {
      * CAMBIO: Orquesta el flujo obteniendo el token UNA VEZ y pasándolo a las demás funciones.
      */
     createBeneficiary: async (beneficiaryInfo) => {
+        // Esta función ya no verifica la existencia. Solo intenta crear.
         const companyId = process.env.BUSINESS_PARTNER_1_ID;
         if (!companyId) throw new Error("BUSINESS_PARTNER_1_ID no está configurado en .env");
 
-        // 1. Obtiene el token y la cookie al inicio del flujo.
         const authHeaders = await getCsrfToken();
 
-        // 2. Pasa los headers de autenticación a la función de búsqueda global.
-        const beneficiaryId = await findGlobalBeneficiary(beneficiaryInfo.identityType, beneficiaryInfo.identityNumber, authHeaders);
-
-        if (beneficiaryId) {
-            // 3. Pasa los headers a la función de verificación de relación.
-            const relationshipExists = await checkBeneficiaryRelationship(companyId, beneficiaryId, authHeaders);
-            if (relationshipExists) {
-                console.log("Relación ya existe. No se tomará ninguna acción.");
-                return { status: 'exists', message: 'El beneficiario ya está asociado a esta empresa.' };
-            }
-        }
-
-        console.log("Creando o vinculando nuevo beneficiario...");
+        // Asumimos que la verificación ya se hizo externamente.
+        // Simplemente construimos el payload y llamamos a la función de creación.
+        console.log("Intentando POST para crear/vincular beneficiario...");
         const payload = {
             "RelationshipTypeId": "ZBUBA6",
             "BusinessPartner2": {
@@ -185,14 +206,12 @@ module.exports = {
                 "BusinessPartnerTypeId": "1",
                 "Name1": beneficiaryInfo.name
             },
-            "ZBUBA6Data": { /* ... */ } // Payload sin cambios
+            "ZBUBA6Data": { /* ... */ }
         };
-        if (beneficiaryId) {
-            payload.BusinessPartner2Id = beneficiaryId;
-            delete payload.BusinessPartner2;
-        }
 
-        // 4. Pasa los headers a la función de creación.
+        // Podríamos añadir una lógica para saber si enviar BusinessPartner2Id si ya existe globalmente,
+        // pero por ahora, la lógica principal de 'crear' es suficiente.
+
         return addBeneficiaryToCompany(payload, authHeaders);
     },
 
@@ -246,5 +265,7 @@ module.exports = {
             // Lanzamos el error ya formateado por nuestra función de utilidad
             throw new Error(parseSapError(error.response?.data));
         }
-    }
+    },
+
+    checkBeneficiaryRelationshipExists
 };
