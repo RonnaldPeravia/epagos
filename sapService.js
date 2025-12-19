@@ -59,7 +59,7 @@ const sapService = {
     getPendingPayments: async () => {
         try {
             // Filtro: TrackID vacío Y Status vacío o nulo
-            const filter = "DocNum eq 5659";
+            const filter = "DocNum eq 561";
             // Seleccionar solo campos necesarios para optimizar
             const select = "DocEntry,DocNum,CardCode,CardName,DocCurrency,TransferSum,TransferReference, U_BPD_OrderNumber, U_BPD_status, U_BPD_message, U_BPD_success, U_BPD_details";
 

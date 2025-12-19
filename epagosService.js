@@ -141,26 +141,43 @@ function parseSapError(error) {
     return `Mensaje Principal de ePagos: ${mainMessage}.`;
 }
 
-/**
- * Función interna para crear la relación del beneficiario
- */
-async function addBeneficiaryToCompany(beneficiaryPayload, authHeaders) {
+async function addBeneficiaryToCompany(beneficiaryPayload) {
     try {
+        const authHeaders = await getCsrfToken();
         const response = await wsdmzClient.post('/Relationships/', beneficiaryPayload, {
-            headers: {
-                'x-csrf-token': authHeaders.csrfToken,
-                'Cookie': authHeaders.cookie,
-                'Accept-Language': 'ES',
-                'Content-Type': 'application/json'
-            }
+            headers: { 'x-csrf-token': authHeaders.csrfToken, 'Cookie': authHeaders.cookie, 'Content-Type': 'application/json' }
         });
 
-        // --- Manejo detallado de la respuesta de ÉXITO ---
+        // --- MANEJO ROBUSTO DE LA RESPUESTA ---
+
+        // Verificamos si la respuesta tiene datos antes de intentar parsearla
+        if (!response.data) {
+            // Este es el caso del éxito asíncrono con cuerpo vacío
+            return {
+                success: true,
+                message: "Solicitud de creación de beneficiario aceptada (asíncrona).",
+                details: {} // Devolvemos un objeto vacío para no causar errores
+            };
+        }
+
         const parsedData = xmlParser.parse(response.data);
-        const properties = parsedData.entry?.content['m:properties'];
+
+        // Verificamos que la estructura parseada sea la que esperamos
+        const properties = parsedData.entry?.content?.['m:properties'];
+
+        if (!properties) {
+            // La respuesta no tuvo la estructura esperada, la tratamos como éxito asíncrono
+            return {
+                success: true,
+                message: "Solicitud de creación aceptada (asíncrona, estructura de respuesta inesperada).",
+                details: {}
+            };
+        }
+
+        // Si todo está bien, devolvemos los detalles completos
         return {
             success: true,
-            message: "Beneficiario vinculado exitosamente.",
+            message: "Beneficiario vinculado exitosamente (síncrono).",
             details: {
                 companyId: properties['d:BusinessPartner1Id'],
                 beneficiaryId: properties['d:BusinessPartner2Id'],
@@ -169,6 +186,7 @@ async function addBeneficiaryToCompany(beneficiaryPayload, authHeaders) {
         };
 
     } catch (error) {
+        // El manejo de errores se mantiene igual
         throw new Error(parseSapError(error));
     }
 }
