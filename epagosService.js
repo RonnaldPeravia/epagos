@@ -73,7 +73,7 @@ async function findGlobalBeneficiary(identityType, identityNumber, authHeaders) 
         if (error.response?.status === 404) return null;
         if (error.message.includes("firewall")) throw error;
         console.error("Error en búsqueda global:", error.response?.data);
-        throw new Error("Error consultando beneficiario global.");
+        throw new Error(parseSapError(error));
     }
 }
 
@@ -95,46 +95,50 @@ async function checkBeneficiaryRelationship(companyId, beneficiaryId, authHeader
     } catch (error) {
         if (error.response?.status === 404) return false;
         console.error("Error al verificar relación:", error.response?.data);
-        throw new Error("Fallo al consultar relación en perfil de empresa.");
+        throw new Error(parseSapError(error));
     }
 }
 
 /**
- * Parsea una respuesta de error XML de SAP y la convierte en un mensaje legible.
+ * Procesa el objeto de error y extrae el mensaje detallado.
+ * @param {object} error - El objeto de error completo lanzado por Axios.
  */
-function parseSapError(errorData) {
-    if (!errorData) {
-        return "La respuesta del servidor no tuvo contenido (posible timeout o cierre de conexión).";
+function parseSapError(error) {
+    const parsedError = error.response?.data;
+
+    if (!parsedError) {
+        if (error.code === 'ECONNABORTED') return `La solicitud excedió el tiempo de espera.`;
+        return error.message || "Error de red o conexión sin respuesta del servidor.";
     }
 
-    try {
-        // 1. Parsea el XML a un objeto JavaScript
-        const parsedError = xmlParser.parse(errorData);
+    // --- LÓGICA DE EXTRACCIÓN CORREGIDA ---
 
-        // 2. Extrae el mensaje principal de forma segura
-        const mainMessage = parsedError.error?.message?.value || "Error general al procesar la solicitud.";
-        let detailedErrorMessage = `La API de ePagos devolvió los siguientes errores:\n- Mensaje Principal: ${mainMessage}\n`;
+    // 1. Buscamos directamente el array 'errordetails'.
+    const errorDetailsArray = parsedError.error?.innererror?.errordetails;
 
-        // 3. Navega de forma segura hasta el array de detalles
-        const errorDetailsArray = parsedError.error?.innererror?.errordetails?.errordetail;
-        
-        if (errorDetailsArray) {
-            // 4. Normaliza a un array (si es un solo objeto, lo convierte en un array de 1 elemento)
-            const details = Array.isArray(errorDetailsArray) ? errorDetailsArray : [errorDetailsArray];
-            
-            // 5. Itera y formatea cada detalle
-            details.forEach((detail, index) => {
-                if (detail && detail.message) { // Asegurarse de que el objeto de detalle es válido
-                    detailedErrorMessage += `  - Detalle ${index + 1}: [${detail.severity || 'info'}] ${detail.message} (Código: ${detail.code || 'N/A'})\n`;
-                }
-            });
+    if (errorDetailsArray) {
+        let detailedErrorMessage = "Errores de ePagos:";
+        // Nos aseguramos de que sea un array
+        const details = Array.isArray(errorDetailsArray) ? errorDetailsArray : [errorDetailsArray];
+
+        const messages = details.map(detail => {
+            // En algunos casos, el array puede contener un objeto con la clave 'errordetail'
+            // Esta lógica maneja ambas estructuras.
+            const errorItem = detail.errordetail || detail;
+            if (errorItem && errorItem.message) {
+                return `${errorItem.message} (Código: ${errorItem.code || 'N/A'})`;
+            }
+            return null;
+        }).filter(Boolean);
+
+        if (messages.length > 0) {
+            return detailedErrorMessage += " " + messages.join('; ');
         }
-        
-        return detailedErrorMessage;
-
-    } catch (parseError) {
-        return `La respuesta del servidor no fue un XML de error válido. Contenido: ${errorData}`;
     }
+
+    // 2. Si no encontramos 'errordetails', usamos el mensaje principal como fallback.
+    const mainMessage = parsedError.error?.message?.value || "Error general desconocido.";
+    return `Mensaje Principal de ePagos: ${mainMessage}.`;
 }
 
 /**
@@ -165,7 +169,7 @@ async function addBeneficiaryToCompany(beneficiaryPayload, authHeaders) {
         };
 
     } catch (error) {
-        throw new Error(parseSapError(error.response?.data));
+        throw new Error(parseSapError(error));
     }
 }
 
@@ -263,7 +267,7 @@ module.exports = {
 
         } catch (error) {
             // Lanzamos el error ya formateado por nuestra función de utilidad
-            throw new Error(parseSapError(error.response?.data));
+            throw new Error(parseSapError(error));
         }
     },
 

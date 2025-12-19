@@ -14,7 +14,7 @@ let isProcessing = false;
 
 // --- CRON JOB ---
 // Se ejecuta cada 5 minutos
-cron.schedule('*/30 10 * * * *', async () => {
+cron.schedule('*/30 * * * * *', async () => {
     if (isProcessing) {
         console.log('⚠️ El ciclo anterior aún está corriendo. Saltando ejecución.');
         return;
