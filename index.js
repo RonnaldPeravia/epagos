@@ -1,6 +1,12 @@
 const express = require('express');
 const cron = require('node-cron');
-const { createBeneficiary, createPaymentOrder, checkBeneficiaryRelationshipExists } = require('./epagosService');
+const {
+    createBeneficiary,
+    createPaymentOrder,
+    checkBeneficiaryRelationshipExists,
+    getBeneficiaryBankAccounts,
+    getPaymentOrderStatus
+} = require('./epagosService');
 const { processPendingPayments } = require('./paymentWorker');
 require('dotenv').config();
 
@@ -14,7 +20,7 @@ let isProcessing = false;
 
 // --- CRON JOB ---
 // Se ejecuta cada 5 minutos
-cron.schedule('*/30 * * * * *', async () => {
+cron.schedule('*/30 20 * * * *', async () => {
     if (isProcessing) {
         console.log('⚠️ El ciclo anterior aún está corriendo. Saltando ejecución.');
         return;
@@ -123,6 +129,38 @@ app.post('/api/beneficiaries', async (req, res) => {
 });
 
 /**
+ * Verifica si un beneficiario existe y está vinculado.
+ * GET /api/beneficiaries/check?identityType=DORN&identityNumber=101813733
+ */
+app.get('/api/beneficiaries/check', async (req, res) => {
+    try {
+        const { identityType, identityNumber } = req.query;
+        if (!identityType || !identityNumber) {
+            return res.status(400).json({ error: "Parámetros 'identityType' y 'identityNumber' son requeridos." });
+        }
+        const exists = await checkBeneficiaryRelationshipExists(process.env.BUSINESS_PARTNER_1_ID, identityType, identityNumber);
+        res.status(200).json({ exists });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * Consulta las cuentas bancarias de un beneficiario.
+ * GET /api/beneficiaries/:beneficiaryId/accounts
+ * Nota: beneficiaryId es el ID de ePagos (ej. 600008532), no el RNC.
+ */
+app.get('/api/beneficiaries/:beneficiaryId/accounts', async (req, res) => {
+    try {
+        const { beneficiaryId } = req.params;
+        const accounts = await getBeneficiaryBankAccounts(process.env.BUSINESS_PARTNER_1_ID, beneficiaryId);
+        res.status(200).json(accounts);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
  * Endpoint para crear una orden de pago.
  */
 app.post('/api/payments', async (req, res) => {
@@ -135,6 +173,20 @@ app.post('/api/payments', async (req, res) => {
             message: "Fallo al procesar la orden de pago.",
             details: error.message
         });
+    }
+});
+
+/**
+ * Consulta el estado de una orden de pago.
+ * GET /api/payments/:orderNumber
+ */
+app.get('/api/payments/:orderNumber', async (req, res) => {
+    try {
+        const { orderNumber } = req.params;
+        const status = await getPaymentOrderStatus(orderNumber);
+        res.status(200).json(status);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
     }
 });
 

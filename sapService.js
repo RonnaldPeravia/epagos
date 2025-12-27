@@ -59,9 +59,9 @@ const sapService = {
     getPendingPayments: async () => {
         try {
             // Filtro: TrackID vacío Y Status vacío o nulo
-            const filter = "DocNum eq 561";
+            const filter = "DocNum eq 3603";
             // Seleccionar solo campos necesarios para optimizar
-            const select = "DocEntry,DocNum,CardCode,CardName,DocCurrency,TransferSum,TransferReference, U_BPD_OrderNumber, U_BPD_status, U_BPD_message, U_BPD_success, U_BPD_details";
+            const select = "DocEntry,DocNum,CardCode,CardName,DocCurrency,TransferSum,TransferReference,Remarks, U_BPD_OrderNumber, U_BPD_status, U_BPD_message, U_BPD_success, U_BPD_details";
 
             const response = await sapClient.get(`/VendorPayments?$filter=${filter}&$select=${select}`);
             return response.data.value;

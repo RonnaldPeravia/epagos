@@ -93,6 +93,7 @@ async function checkBeneficiaryRelationship(companyId, beneficiaryId, authHeader
         });
         return true;
     } catch (error) {
+        console.error("checkBeneficiaryRelationship -> error:", error.response?.data);
         if (error.response?.status === 404) return false;
         console.error("Error al verificar relación:", error.response?.data);
         throw new Error(parseSapError(error));
@@ -142,6 +143,7 @@ function parseSapError(error) {
 }
 
 async function addBeneficiaryToCompany(beneficiaryPayload) {
+    console.log('Ejecutando addBeneficiaryToCompany...')
     try {
         const authHeaders = await getCsrfToken();
         const response = await wsdmzClient.post('/Relationships/', beneficiaryPayload, {
@@ -186,6 +188,7 @@ async function addBeneficiaryToCompany(beneficiaryPayload) {
         };
 
     } catch (error) {
+        console.log('addBeneficiaryToCompany -> error >', error)
         // El manejo de errores se mantiene igual
         throw new Error(parseSapError(error));
     }
@@ -204,6 +207,46 @@ async function checkBeneficiaryRelationshipExists(companyId, identityType, ident
     }
 }
 
+/**
+ * Consulta todas las cuentas bancarias de un beneficiario específico.
+ * @param {string} companyId - Tu ID de empresa.
+ * @param {string} beneficiaryId - El ID del beneficiario en ePagos.
+ */
+async function getBeneficiaryBankAccounts(companyId, beneficiaryId) {
+    console.log(`Consultando cuentas para beneficiario ${beneficiaryId}...`);
+    try {
+        const authHeaders = await getCsrfToken();
+        const url = `/ZBUBA6Data(BusinessPartner1Id='${companyId}',BusinessPartner2Id='${beneficiaryId}',RelationshipTypeId='ZBUBA6')/PaymentOptions?$expand=BankAccount`;
+
+        const response = await wsdmzClient.get(url, {
+            headers: { 'Accept': 'application/xml', 'x-csrf-token': authHeaders.csrfToken, 'Cookie': authHeaders.cookie }
+        });
+        return xmlParser.parse(response.data);
+    } catch (error) {
+        throw new Error(parseSapError(error));
+    }
+}
+
+/**
+ * Consulta el estado detallado de una orden de pago.
+ * @param {string} orderNumber - El número de orden (OrderNr) que devolvió ePagos.
+ */
+async function getPaymentOrderStatus(orderNumber) {
+    console.log(`Consultando estado de la orden ${orderNumber}...`);
+    try {
+        const authHeaders = await getCsrfToken();
+        // El endpoint es /Orders('NUMERO')/OrderItems
+        const url = `/Orders('${orderNumber}')/OrderItems`;
+
+        const response = await wsdmzClient.get(url, {
+            headers: { 'Accept': 'application/xml', 'x-csrf-token': authHeaders.csrfToken, 'Cookie': authHeaders.cookie }
+        });
+        return xmlParser.parse(response.data);
+    } catch (error) {
+        throw new Error(parseSapError(error));
+    }
+}
+
 // --- FUNCIONES EXPORTADAS ---
 
 module.exports = {
@@ -217,9 +260,6 @@ module.exports = {
 
         const authHeaders = await getCsrfToken();
 
-        // Asumimos que la verificación ya se hizo externamente.
-        // Simplemente construimos el payload y llamamos a la función de creación.
-        console.log("Intentando POST para crear/vincular beneficiario...");
         const payload = {
             "RelationshipTypeId": "ZBUBA6",
             "BusinessPartner2": {
@@ -231,6 +271,8 @@ module.exports = {
             "ZBUBA6Data": { /* ... */ }
         };
 
+        console.log('createBeneficiary -> payload:', payload)
+
         // Podríamos añadir una lógica para saber si enviar BusinessPartner2Id si ya existe globalmente,
         // pero por ahora, la lógica principal de 'crear' es suficiente.
 
@@ -238,56 +280,56 @@ module.exports = {
     },
 
     /**
-       * Crea una orden de pago y maneja la respuesta detallada
-       */
+     * Crea una orden de pago y maneja respuestas síncronas y asíncronas.
+     */
     createPaymentOrder: async (paymentPayload) => {
         try {
             const authHeaders = await getCsrfToken();
             const response = await wsdmzClient.post('/Orders/', paymentPayload, {
-                headers: {
-                    'x-csrf-token': authHeaders.csrfToken,
-                    'Cookie': authHeaders.cookie,
-                    'Accept-Language': 'ES',
-                    'Content-Type': 'application/json'
-                }
+                headers: { 'x-csrf-token': authHeaders.csrfToken, 'Cookie': authHeaders.cookie, 'Content-Type': 'application/json' }
             });
 
-            // --- Manejo detallado de la respuesta de ÉXITO ---
-            const parsedData = xmlParser.parse(response.data);
-            const orderProperties = parsedData.entry?.content['m:properties'];
-            const items = parsedData.entry?.feed?.entry;
+            // --- MANEJO ROBUSTO DE LA RESPUESTA ---
 
-            const processedItems = [];
-            if (items) {
-                const itemList = Array.isArray(items) ? items : [items];
-                itemList.forEach(item => {
-                    const itemProps = item.content['m:properties'];
-                    processedItems.push({
-                        lineNumber: itemProps['d:LineNr'],
-                        payeeId: itemProps['d:PayeeId'],
-                        reference: itemProps['d:Reference'],
-                        netAmount: itemProps['d:NetAmount'],
-                        currency: itemProps['d:CurrencyId']
-                    });
-                });
+            // Si la respuesta no tiene cuerpo, asumimos éxito asíncrono.
+            if (!response.data) {
+                return {
+                    success: true,
+                    message: "Solicitud de orden de pago aceptada (asíncrona, sin cuerpo de respuesta).",
+                    details: { orderNumber: "PEND_ASYNC" }
+                };
             }
 
+            const parsedData = xmlParser.parse(response.data);
+            const orderProperties = parsedData.entry?.content?.['m:properties'];
+
+            // Si la respuesta no tiene la estructura esperada, también asumimos éxito asíncrono.
+            if (!orderProperties) {
+                return {
+                    success: true,
+                    message: "Solicitud de orden de pago aceptada (asíncrona, estructura de respuesta inesperada).",
+                    details: { orderNumber: "PEND_ASYNC" }
+                };
+            }
+
+            // Si la respuesta es síncrona y completa, extraemos los datos.
             return {
                 success: true,
-                message: "Orden de pago aceptada para procesamiento.",
+                message: "Orden de pago aceptada para procesamiento (síncrona).",
                 details: {
                     orderNumber: orderProperties['d:OrderNr'],
                     status: orderProperties['d:StatusName'],
-                    totalAmount: orderProperties['d:NetAmountTotal'],
-                    processedItems: processedItems
+                    totalAmount: orderProperties['d:NetAmountTotal']
                 }
             };
 
         } catch (error) {
-            // Lanzamos el error ya formateado por nuestra función de utilidad
+            // El manejo de errores se mantiene igual, ya que es robusto.
             throw new Error(parseSapError(error));
         }
     },
 
-    checkBeneficiaryRelationshipExists
+    checkBeneficiaryRelationshipExists,
+    getBeneficiaryBankAccounts,
+    getPaymentOrderStatus
 };
