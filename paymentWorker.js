@@ -40,70 +40,89 @@ async function processPendingPayments() {
 
                 // --- 2. SINCRONIZACIÓN DE BENEFICIARIO (CON LÓGICA DE DUPLICADO) ---
                 if (bp.U_BPD_Synced !== 'Y') {
-                    console.log(`   El proveedor ${bp.CardCode} no está sincronizado. Validando/Creando en ePagos...`);
+                    console.log(`   El proveedor ${bp.CardCode} no está sincronizado. Iniciando validación...`);
 
-                    // --- LÓGICA DE VERIFICACIÓN PRIMERO (CLEAN ARCHITECTURE) ---
+                    // --- LÓGICA DE VERIFICACIÓN Y CONSTRUCCIÓN DE PAYLOAD INTELIGENTE ---
 
-                    // Construimos la información del beneficiario que necesitamos para verificar
+                    const companyId = process.env.BUSINESS_PARTNER_1_ID;
+
                     const beneficiaryInfo = {
                         identityType: (bp.FederalTaxID.length === 11) ? "DOCE" : "DORN",
                         identityNumber: bp.FederalTaxID.replace(/[^0-9]/g, ''),
-                        // ... (el resto de los campos para la creación posterior)
+                        name: bp.CardName.substring(0, 40),
+                        bankId: bankCodeBPD,
+                        accountType: (bp.AccountTypeControlKey === 'CA') ? '26' : '20',
+                        accountNumber: bp.AccountNo.replace(/[^0-9]/g, ''),
+                        methodId: bankCodeBPD === '10101070' ? 'D' : 'A'
                     };
 
-                    // Paso 1: Verificamos si ya existe ANTES de intentar crear
-                    let isVerified = await epagosService.checkBeneficiaryRelationshipExists(
-                        process.env.BUSINESS_PARTNER_1_ID,
-                        beneficiaryInfo.identityType,
-                        beneficiaryInfo.identityNumber
-                    );
+                    // Paso 1: Verificamos si existe globalmente para obtener su ID
+                    console.log("      Buscando beneficiario globalmente...");
+                    const beneficiaryId = await epagosService.findGlobalBeneficiary(beneficiaryInfo.identityType, beneficiaryInfo.identityNumber);
 
-                    // Paso 2: Si no existe, procedemos a crear y luego a verificar con sondeo
-                    if (!isVerified) {
-                        console.log("      Beneficiario no encontrado. Intentando POST para crear/vincular...");
-
-                        try {
-                            await epagosService.createBeneficiary(beneficiaryInfo);
-                        } catch (error) {
-                            console.log('createBeneficiary error: ', error)
-                            if (error.message && error.message.includes("Identificación duplicada")) {
-                                console.log("      INFO: El POST falló por duplicado, confirmando que el beneficiario existe. Se considera sincronizado.");
-                                isVerified = true; // Forzamos la verificación a true
-                            } else if (error.message && error.message.includes("Respuesta vacía del servidor")) {
-                                console.log("      INFO: Se inició la creación asíncrona. Se procederá a verificar...");
-                                // Dejamos que el sondeo de abajo haga el trabajo
-                            } else {
-                                throw error; // Si es un error diferente, lo lanzamos
-                            }
+                    // Paso 2: Construimos el payload correcto
+                    const payload = {
+                        "RelationshipTypeId": "ZBUBA6",
+                        "ZBUBA6Data": {
+                            "PaymentOptions": [{
+                                // Nombres en PascalCase como los espera la API
+                                "BankAccount": { "BankId": beneficiaryInfo.bankId, "AccountTypeId": beneficiaryInfo.accountType, "BankAccountNr": beneficiaryInfo.accountNumber },
+                                "MethodId": beneficiaryInfo.methodId,
+                                "CurrencyId": "DOP"
+                            }]
                         }
+                    };
 
-                        // Solo hacemos sondeo si la creación fue asíncrona y no sabemos el estado
-                        if (!isVerified) {
-                            for (let i = 0; i < 3; i++) {
-                                console.log(`      Intento de verificación post-creación #${i + 1}...`);
-                                await new Promise(resolve => setTimeout(resolve, 5000));
-
-                                const relationshipExists = await epagosService.checkBeneficiaryRelationshipExists(
-                                    process.env.BUSINESS_PARTNER_1_ID,
-                                    beneficiaryInfo.identityType,
-                                    beneficiaryInfo.identityNumber
-                                );
-                                if (relationshipExists) {
-                                    isVerified = true;
-                                    break;
-                                }
-                            }
-                        }
+                    if (beneficiaryId) {
+                        console.log(`      Beneficiario encontrado globalmente con ID: ${beneficiaryId}. Se procederá a VINCULAR.`);
+                        // Si encontramos un ID, preparamos un payload de VINCULACIÓN
+                        payload.BusinessPartner2Id = beneficiaryId;
                     } else {
-                        console.log("   INFO: El beneficiario ya existía en ePagos. Saltando creación.");
+                        payload.BusinessPartner2 = {
+                            // Nombres en PascalCase como los espera la API
+                            "IdentityTypeId": beneficiaryInfo.identityType,
+                            "IdentityNr": beneficiaryInfo.identityNumber,
+                            "BusinessPartnerTypeId": "1",
+                            "Name1": beneficiaryInfo.name
+                        };
                     }
 
-                    // Paso 3: Actualizar SAP si la verificación fue exitosa
+                    // Paso 3: Intentamos la creación/vinculación asíncrona con el payload correcto
+                    try {
+                        await epagosService.createBeneficiary(payload); // Pasamos el payload ya construido
+                    } catch (error) {
+                        // La lógica para manejar la respuesta vacía o el error de duplicado (como doble confirmación) se mantiene
+                        if (error.message && error.message.includes("Respuesta vacía del servidor")) {
+                            console.log("      INFO: Se inició la operación asíncrona. Verificando...");
+                        } else if (error.message && error.message.includes("Identificación duplicada")) {
+                            console.log("      INFO: El POST falló por duplicado, confirmando que el beneficiario existe.");
+                        } else {
+                            throw error; // Si es un error diferente, lo lanzamos
+                        }
+                    }
+
+                    // Paso 4: Sondeo de confirmación (esta lógica no cambia)
+                    let isVerified = false;
+                    for (let i = 0; i < 3; i++) {
+                        console.log(`      Intento de verificación post-creación #${i + 1}...`);
+                        await new Promise(resolve => setTimeout(resolve, 5000));
+
+                        const relationshipExists = await epagosService.checkBeneficiaryRelationshipExists(
+                            process.env.BUSINESS_PARTNER_1_ID,
+                            beneficiaryInfo.identityType,
+                            beneficiaryInfo.identityNumber
+                        );
+                        if (relationshipExists) {
+                            isVerified = true;
+                            break;
+                        }
+                    }
+
                     if (isVerified) {
                         await sapService.updateBPSyncStatus(bp.CardCode, 'Y');
                         console.log(`   ✅ Proveedor ${bp.CardCode} sincronizado y verificado.`);
                     } else {
-                        throw new Error("No se pudo verificar la existencia del beneficiario en ePagos después de varios intentos.");
+                        throw new Error("No se pudo verificar la existencia de la relación en ePagos.");
                     }
                 }
 
@@ -131,24 +150,22 @@ async function processPendingPayments() {
                     "OrderTypeId": "A",
                     "OrderItems": [{
                         "Payee": {
+                            // Nombres en PascalCase
                             "IdentityTypeId": (bp.FederalTaxID.length === 11) ? "DOCE" : "DORN",
                             "IdentityNr": bp.FederalTaxID.replace(/[^0-9]/g, '')
                         },
+                        // Nombres en PascalCase
                         "CurrencyId": currency,
                         "NetAmount": payment.TransferSum.toFixed(2),
                         "Reference": `SAP-${payment.DocNum}`,
                         "Memo": (payment.Remarks || `Pago DocNum ${payment.DocNum}`).substring(0, 49),
                         "PaymentMethodId": bankCodeBPD === '10101070' ? 'D' : 'A',
-                        // Keys de Cuentas: Asumimos '0001' como valor por defecto.
                         "BankAccountFromKey": "0001",
                         "BankAccountToKey": "0001",
-
-                        // Lógica de Tipo de Documento
                         "DocumentClassId": documentClassId,
                         "NCF": ncf,
-
-                        "DocumentDate": `${currentDateISO.split('T')[0]}T00:00:00`,
-                        "PaymentDate": `${currentDateISO.split('T')[0]}T00:00:00`
+                        "DocumentDate": currentDateISO,
+                        "PaymentDate": currentDateISO
                     }]
                 };
 

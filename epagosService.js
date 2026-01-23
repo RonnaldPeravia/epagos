@@ -53,26 +53,13 @@ async function getCsrfToken() {
 /**
  * CAMBIO: Ahora acepta y usa el token CSRF para la petición GET.
  */
-async function findGlobalBeneficiary(identityType, identityNumber, authHeaders) {
-    console.log('findGlobalBeneficiary: ', { "identityType": identityType, "identityNumber": identityNumber, "authHeaders": authHeaders })
+async function findGlobalBeneficiary(identityType, identityNumber) {
     try {
         const url = `/FindBusinessPartnerByIdentity?IdentityTypeId='${identityType}'&IdentityNr='${identityNumber}'`;
-        const response = await commonClient.get(url, {
-            headers: {
-                'Accept': 'application/xml',
-                'x-csrf-token': authHeaders.csrfToken, // <-- AÑADIDO
-                'Cookie': authHeaders.cookie,          // <-- AÑADIDO
-            }
-        });
-        if (response.headers['content-type']?.includes('text/html')) {
-            throw new Error("La solicitud fue bloqueada por el firewall de seguridad (WAF).");
-        }
-        const parsed = xmlParser.parse(response.data);
-        return parsed.entry?.content['m:properties']['d:Id'] || null;
+        const response = await commonClient.get(url, { headers: { 'Accept': 'application/xml' } });
+        return xmlParser.parse(response.data).entry?.content['m:properties']['d:Id'] || null;
     } catch (error) {
         if (error.response?.status === 404) return null;
-        if (error.message.includes("firewall")) throw error;
-        console.error("Error en búsqueda global:", error.response?.data);
         throw new Error(parseSapError(error));
     }
 }
@@ -80,22 +67,13 @@ async function findGlobalBeneficiary(identityType, identityNumber, authHeaders) 
 /**
  * CAMBIO: Ahora acepta y usa el token CSRF para la petición GET.
  */
-async function checkBeneficiaryRelationship(companyId, beneficiaryId, authHeaders) {
-    console.log('checkBeneficiaryRelationship: ', { "companyId": companyId, "beneficiaryId": beneficiaryId, "authHeaders": authHeaders })
+async function checkBeneficiaryRelationship(companyId, beneficiaryId) {
     try {
         const url = `/Relationships(BusinessPartner1Id='${companyId}',BusinessPartner2Id='${beneficiaryId}',RelationshipTypeId='ZBUBA6')`;
-        await wsdmzClient.get(url, {
-            headers: {
-                'Accept': 'application/xml',
-                'x-csrf-token': authHeaders.csrfToken, // <-- AÑADIDO
-                'Cookie': authHeaders.cookie,          // <-- AÑADIDO
-            }
-        });
+        await wsdmzClient.get(url, { headers: { 'Accept': 'application/xml' } });
         return true;
     } catch (error) {
-        console.error("checkBeneficiaryRelationship -> error:", error.response?.data);
         if (error.response?.status === 404) return false;
-        console.error("Error al verificar relación:", error.response?.data);
         throw new Error(parseSapError(error));
     }
 }
@@ -143,53 +121,50 @@ function parseSapError(error) {
 }
 
 async function addBeneficiaryToCompany(beneficiaryPayload) {
-    console.log('Ejecutando addBeneficiaryToCompany...')
+    console.log('Ejecutando addBeneficiaryToCompany con Payload...', beneficiaryPayload);
     try {
         const authHeaders = await getCsrfToken();
-        const response = await wsdmzClient.post('/Relationships/', beneficiaryPayload, {
-            headers: { 'x-csrf-token': authHeaders.csrfToken, 'Cookie': authHeaders.cookie, 'Content-Type': 'application/json' }
+        const data = JSON.stringify(beneficiaryPayload);
+
+        const response = await wsdmzClient.post('/Relationships/', data, {
+            headers: {
+                'Content-Type': 'application/json;charset=utf-8',
+                'Accept': 'application/json', // <-- AÑADIDO: Pedimos explícitamente JSON
+                'x-csrf-token': authHeaders.csrfToken,
+                'Cookie': authHeaders.cookie
+            }
         });
 
-        // --- MANEJO ROBUSTO DE LA RESPUESTA ---
+        // --- LÓGICA DE PARSEO FINAL Y CORRECTA ---
 
-        // Verificamos si la respuesta tiene datos antes de intentar parsearla
-        if (!response.data) {
-            // Este es el caso del éxito asíncrono con cuerpo vacío
+        // Ya no necesitamos parsear XML, axios ya nos da el objeto JS.
+        const responseData = response.data;
+        console.log("--- Objeto de respuesta recibido del banco ---");
+        console.log(JSON.stringify(responseData, null, 2));
+
+        if (!responseData || !responseData.d) {
+            // Maneja el caso de respuesta vacía o con estructura inesperada
             return {
                 success: true,
-                message: "Solicitud de creación de beneficiario aceptada (asíncrona).",
-                details: {} // Devolvemos un objeto vacío para no causar errores
+                message: "Solicitud de vinculación aceptada (asíncrona, sin detalles).",
+                details: responseData || {}
             };
         }
 
-        const parsedData = xmlParser.parse(response.data);
+        // Extraemos las propiedades desde la clave 'd'
+        const properties = responseData.d;
 
-        // Verificamos que la estructura parseada sea la que esperamos
-        const properties = parsedData.entry?.content?.['m:properties'];
-
-        if (!properties) {
-            // La respuesta no tuvo la estructura esperada, la tratamos como éxito asíncrono
-            return {
-                success: true,
-                message: "Solicitud de creación aceptada (asíncrona, estructura de respuesta inesperada).",
-                details: {}
-            };
-        }
-
-        // Si todo está bien, devolvemos los detalles completos
         return {
             success: true,
-            message: "Beneficiario vinculado exitosamente (síncrono).",
+            message: "Beneficiario vinculado exitosamente.",
             details: {
-                companyId: properties['d:BusinessPartner1Id'],
-                beneficiaryId: properties['d:BusinessPartner2Id'],
-                relationshipType: properties['d:RelationshipTypeId']
+                companyId: properties.BusinessPartner1Id,
+                beneficiaryId: properties.BusinessPartner2Id,
+                relationshipType: properties.RelationshipTypeId
             }
         };
 
     } catch (error) {
-        console.log('addBeneficiaryToCompany -> error >', error)
-        // El manejo de errores se mantiene igual
         throw new Error(parseSapError(error));
     }
 }
@@ -204,6 +179,53 @@ async function checkBeneficiaryRelationshipExists(companyId, identityType, ident
     } catch (error) {
         console.error("Error durante la verificación de existencia de la relación:", error.message);
         return false;
+    }
+}
+
+/**
+ * Añade una nueva cuenta bancaria (Payment Option) a un beneficiario ya vinculado.
+ * Corresponde a la sección "Adicionar cuenta" (Pág. 22) de la guía.
+ * @param {string} beneficiaryId - El ID de ePagos del beneficiario.
+ * @param {object} accountInfo - Objeto con los detalles de la cuenta (bankId, accountType, etc.).
+ */
+async function addBankAccountToBeneficiary(beneficiaryId, accountInfo) {
+    console.log(`Añadiendo cuenta al beneficiario ${beneficiaryId}...`);
+    try {
+        // El endpoint es diferente, es /ZBUBA6PaymentOptions
+        const url = `/ZBUBA6PaymentOptions`;
+
+        // El payload también tiene una estructura específica
+        const payload = {
+            "BusinessPartner2Id": beneficiaryId,
+            "PaymentMethod": {
+                "Name": "Transferencia Cuentas BPD" // Un nombre descriptivo
+            },
+            "BankAccount": {
+                "BankId": accountInfo.bankId,
+                "BankName": "Banco Popular", // Opcional, pero bueno tenerlo
+                "AccountTypeId": accountInfo.accountType,
+                "BankAccountNr": accountInfo.accountNumber
+            },
+            "MethodId": accountInfo.methodId,
+            "CurrencyId": "DOP"
+        };
+
+        const authHeaders = await getCsrfToken();
+        const response = await wsdmzClient.post(url, payload, {
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'x-csrf-token': authHeaders.csrfToken,
+                'Cookie': authHeaders.cookie
+            }
+        });
+
+        // La respuesta de un POST exitoso a veces es un 201/204 sin cuerpo,
+        // o a veces devuelve el objeto creado.
+        return { success: true, message: "Solicitud para añadir cuenta enviada.", details: response.data || "Sin cuerpo de respuesta." };
+
+    } catch (error) {
+        throw new Error(parseSapError(error));
     }
 }
 
@@ -253,30 +275,8 @@ module.exports = {
     /**
      * CAMBIO: Orquesta el flujo obteniendo el token UNA VEZ y pasándolo a las demás funciones.
      */
-    createBeneficiary: async (beneficiaryInfo) => {
-        // Esta función ya no verifica la existencia. Solo intenta crear.
-        const companyId = process.env.BUSINESS_PARTNER_1_ID;
-        if (!companyId) throw new Error("BUSINESS_PARTNER_1_ID no está configurado en .env");
-
-        const authHeaders = await getCsrfToken();
-
-        const payload = {
-            "RelationshipTypeId": "ZBUBA6",
-            "BusinessPartner2": {
-                "IdentityTypeId": beneficiaryInfo.identityType,
-                "IdentityNr": beneficiaryInfo.identityNumber,
-                "BusinessPartnerTypeId": "1",
-                "Name1": beneficiaryInfo.name
-            },
-            "ZBUBA6Data": { /* ... */ }
-        };
-
-        console.log('createBeneficiary -> payload:', payload)
-
-        // Podríamos añadir una lógica para saber si enviar BusinessPartner2Id si ya existe globalmente,
-        // pero por ahora, la lógica principal de 'crear' es suficiente.
-
-        return addBeneficiaryToCompany(payload, authHeaders);
+    createBeneficiary: async (payload) => {
+        return addBeneficiaryToCompany(payload);
     },
 
     /**
@@ -331,5 +331,9 @@ module.exports = {
 
     checkBeneficiaryRelationshipExists,
     getBeneficiaryBankAccounts,
-    getPaymentOrderStatus
+    getPaymentOrderStatus,
+    findGlobalBeneficiary,
+    checkBeneficiaryRelationship,
+    getCsrfToken,
+    addBankAccountToBeneficiary
 };

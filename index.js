@@ -5,7 +5,11 @@ const {
     createPaymentOrder,
     checkBeneficiaryRelationshipExists,
     getBeneficiaryBankAccounts,
-    getPaymentOrderStatus
+    getPaymentOrderStatus,
+    findGlobalBeneficiary,
+    checkBeneficiaryRelationship,
+    getCsrfToken,
+    addBankAccountToBeneficiary
 } = require('./epagosService');
 const { processPendingPayments } = require('./paymentWorker');
 require('dotenv').config();
@@ -20,7 +24,7 @@ let isProcessing = false;
 
 // --- CRON JOB ---
 // Se ejecuta cada 5 minutos
-cron.schedule('*/30 20 * * * *', async () => {
+cron.schedule('*/30 59 * * * *', async () => {
     if (isProcessing) {
         console.log('⚠️ El ciclo anterior aún está corriendo. Saltando ejecución.');
         return;
@@ -57,6 +61,150 @@ app.post('/api/trigger-sync', async (req, res) => {
 // Función de utilidad para esperar
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+// ==========================================================
+// ========== ENDPOINTS DE PRUEBAS UNITARIAS ================
+// ==========================================================
+console.log("Endpoints de pruebas unitarias activos en /api/unit-test/");
+
+// --- Grupo 1: BENEFICIARIOS ---
+
+// 1. Consulta Global de Beneficiario
+app.get('/api/unit-test/beneficiaries/find-global', async (req, res) => {
+    try {
+        const { identityType, identityNumber } = req.query;
+        if (!identityType || !identityNumber) return res.status(400).json({ error: "Parámetros 'identityType' y 'identityNumber' son requeridos." });
+
+        const beneficiaryId = await findGlobalBeneficiary(identityType, identityNumber);
+        if (beneficiaryId) {
+            res.status(200).json({ found: true, message: "Beneficiario encontrado globalmente.", beneficiaryId });
+        } else {
+            res.status(404).json({ found: false, message: "Beneficiario no encontrado globalmente." });
+        }
+    } catch (error) {
+        res.status(500).json({ success: false, message: "Error en la consulta global.", details: error.message });
+    }
+});
+
+// 2. Verificar Relación con la Empresa
+app.get('/api/unit-test/beneficiaries/:beneficiaryId/check-relationship', async (req, res) => {
+    try {
+        const { beneficiaryId } = req.params;
+        const companyId = process.env.BUSINESS_PARTNER_1_ID;
+        if (!companyId) throw new Error("BUSINESS_PARTNER_1_ID no está configurado.");
+
+        const exists = await checkBeneficiaryRelationship(companyId, beneficiaryId);
+        res.status(200).json({
+            relationshipExists: exists,
+            message: exists ? "La relación entre la empresa y el beneficiario SÍ existe." : "La relación entre la empresa y el beneficiario NO existe."
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, message: "Error al verificar la relación.", details: error.message });
+    }
+});
+
+// 3. Verificación Completa (Combo)
+app.get('/api/unit-test/beneficiaries/exists-in-company', async (req, res) => {
+    try {
+        const { identityType, identityNumber } = req.query;
+        if (!identityType || !identityNumber) return res.status(400).json({ error: "Parámetros 'identityType' y 'identityNumber' son requeridos." });
+
+        const exists = await checkBeneficiaryRelationshipExists(process.env.BUSINESS_PARTNER_1_ID, identityType, identityNumber);
+        res.status(200).json({
+            existsInCompany: exists,
+            message: exists ? "El beneficiario SÍ existe y está vinculado a la empresa." : "El beneficiario NO existe o NO está vinculado a la empresa."
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, message: "Error en la verificación completa.", details: error.message });
+    }
+});
+
+// 4. Crear Nuevo Beneficiario
+app.post('/api/unit-test/beneficiaries/create', async (req, res) => {
+    try {
+        const payload = req.body;
+        if (!payload.BusinessPartner2) return res.status(400).json({ error: "El payload debe contener el objeto 'BusinessPartner2' para la creación." });
+
+        const result = await createBeneficiary(payload);
+        res.status(201).json({ success: true, message: "Solicitud de CREACIÓN enviada.", result });
+    } catch (error) {
+        res.status(500).json({ success: false, message: "Error al intentar crear el beneficiario.", details: error.message });
+    }
+});
+
+// 5. Vincular Beneficiario Existente
+app.post('/api/unit-test/beneficiaries/link', async (req, res) => {
+    try {
+        const payload = req.body;
+        if (!payload.BusinessPartner2Id) {
+            return res.status(400).json({ error: "El payload debe contener la propiedad 'BusinessPartner2Id' para la vinculación." });
+        }
+
+        // --- CORRECIÓN ---
+        // Pasamos la variable 'payload' a la función createBeneficiary.
+        const result = await createBeneficiary(payload);
+
+        res.status(201).json({ success: true, message: "Solicitud de VINCULACIÓN enviada.", result });
+    } catch (error) {
+        res.status(500).json({ success: false, message: "Error al intentar vincular el beneficiario.", details: error.message });
+    }
+});
+
+/**
+ * PRUEBA UNITARIA: Añade una cuenta a un beneficiario ya vinculado.
+ * POST /api/unit-test/beneficiaries/:beneficiaryId/add-account
+ */
+app.post('/api/unit-test/beneficiaries/:beneficiaryId/add-account', async (req, res) => {
+    try {
+        const { beneficiaryId } = req.params;
+        const accountInfo = req.body; // El body contendrá { bankId, accountType, ... }
+
+        const result = await addBankAccountToBeneficiary(beneficiaryId, accountInfo);
+        res.status(201).json(result);
+    } catch (error) {
+        res.status(500).json({ success: false, message: "Error al añadir la cuenta.", details: error.message });
+    }
+});
+
+
+// --- Grupo 2: ÓRDENES DE PAGO ---
+
+// 7 & 8. Crear una Orden de Pago (Simple o Múltiple)
+app.post('/api/unit-test/payments/create', async (req, res) => {
+    try {
+        const payload = req.body;
+        if (!payload.OrderItems || payload.OrderItems.length === 0) return res.status(400).json({ error: "El payload debe contener un array 'OrderItems' con al menos un elemento." });
+
+        const result = await createPaymentOrder(payload);
+        res.status(201).json({ success: true, message: "Solicitud de orden de pago enviada.", result });
+    } catch (error) {
+        res.status(500).json({ success: false, message: "Error al crear la orden de pago.", details: error.message });
+    }
+});
+
+// 9. Consultar Estado de una Orden de Pago
+app.get('/api/unit-test/payments/:orderNumber', async (req, res) => {
+    try {
+        const { orderNumber } = req.params;
+        const result = await getPaymentOrderStatus(orderNumber);
+        res.status(200).json({ success: true, orderStatus: result });
+    } catch (error) {
+        res.status(500).json({ success: false, message: "Error al consultar el estado de la orden.", details: error.message });
+    }
+});
+
+
+// --- Grupo 3: TOKEN Y SESIÓN ---
+
+// 10. Obtener Token CSRF
+app.get('/api/unit-test/session/get-token', async (req, res) => {
+    try {
+        const result = await getCsrfToken();
+        res.status(200).json({ success: true, message: "Token y cookie obtenidos exitosamente.", ...result });
+    } catch (error) {
+        res.status(500).json({ success: false, message: "Error al obtener el token CSRF.", details: error.message });
+    }
+});
+
 /**
  * Endpoint para crear un nuevo beneficiario.
  * Sigue el flujo completo de 3 pasos.
@@ -66,39 +214,55 @@ app.post('/api/beneficiaries', async (req, res) => {
         const beneficiaryInfo = req.body;
         const companyId = process.env.BUSINESS_PARTNER_1_ID;
 
-        // --- PASO 1: VERIFICAR PRIMERO ---
+        // --- PASO 1: VERIFICAR PRIMERO (usando funciones de bajo nivel) ---
         console.log("Verificando si el beneficiario ya existe...");
-        const alreadyExists = await checkBeneficiaryRelationshipExists(
-            companyId,
-            beneficiaryInfo.identityType,
-            beneficiaryInfo.identityNumber
-        );
+        const beneficiaryId = await findGlobalBeneficiary(beneficiaryInfo.identityType, beneficiaryInfo.identityNumber);
 
-        // --- PASO 2: MANEJAR EL CASO "YA EXISTE" ---
-        if (alreadyExists) {
-            console.log("Respuesta: El beneficiario ya existe. Finalizando.");
-            // Devolvemos 200 OK, no 201 Created.
-            return res.status(200).json({ success: true, message: "El beneficiario ya existe y está vinculado a la empresa." });
+        if (beneficiaryId) {
+            const relationshipExists = await checkBeneficiaryRelationship(companyId, beneficiaryId);
+            if (relationshipExists) {
+                console.log("Respuesta: El beneficiario ya existe y está vinculado.");
+                return res.status(200).json({ success: true, message: "El beneficiario ya existe y está vinculado a la empresa." });
+            }
+        }
+
+        // --- PASO 2: CONSTRUIR EL PAYLOAD CON LOS NOMBRES CORRECTOS (PascalCase) ---
+        const payload = {
+            "RelationshipTypeId": "ZBUBA6",
+            "ZBUBA6Data": {
+                "PaymentOptions": [{
+                    "BankAccount": { "BankId": beneficiaryInfo.bankId, "AccountTypeId": beneficiaryInfo.accountType, "BankAccountNr": beneficiaryInfo.accountNumber },
+                    "MethodId": beneficiaryInfo.methodId, "CurrencyId": "DOP"
+                }]
+            }
+        };
+
+        if (beneficiaryId) {
+            payload.BusinessPartner2Id = beneficiaryId;
+        } else {
+            payload.BusinessPartner2 = {
+                "IdentityTypeId": beneficiaryInfo.identityType,
+                "IdentityNr": beneficiaryInfo.identityNumber,
+                "BusinessPartnerTypeId": "1",
+                "Name1": beneficiaryInfo.name
+            };
         }
 
         // --- PASO 3: INTENTAR LA CREACIÓN ASÍNCRONA ---
-        // Si llegamos aquí, el beneficiario no existe.
         try {
-            // Llamamos a la función simplificada que solo hace el POST.
-            await createBeneficiary(beneficiaryInfo);
+            await createBeneficiary(payload); // Llamamos a la función 'tonta' con el payload ya construido
         } catch (error) {
-            if (error.message.includes("Contenido: undefined") || error.message.includes("read ECONNRESET")) {
+            if (error.message.includes("Respuesta vacía del servidor") || error.message.includes("ECONNRESET")) {
                 console.log("Se inició la creación asíncrona. Se procederá a verificar...");
             } else {
-                // Si es un error real, lo lanzamos.
-                throw error;
+                throw error; // Si es un error real, lo lanzamos
             }
         }
 
         // --- PASO 4: SONDEO (POLLING) PARA VERIFICAR LA CREACIÓN ---
         let isCreated = false;
         const maxRetries = 5;
-        const retryDelay = 10000;
+        const retryDelay = 10000; // 10 segundos
 
         for (let i = 0; i < maxRetries; i++) {
             console.log(`Intento de verificación #${i + 1} de ${maxRetries}...`);
@@ -150,7 +314,7 @@ app.get('/api/beneficiaries/check', async (req, res) => {
  * GET /api/beneficiaries/:beneficiaryId/accounts
  * Nota: beneficiaryId es el ID de ePagos (ej. 600008532), no el RNC.
  */
-app.get('/api/beneficiaries/:beneficiaryId/accounts', async (req, res) => {
+app.get('/api/unit-test/beneficiaries/:beneficiaryId/accounts', async (req, res) => {
     try {
         const { beneficiaryId } = req.params;
         const accounts = await getBeneficiaryBankAccounts(process.env.BUSINESS_PARTNER_1_ID, beneficiaryId);
