@@ -12,6 +12,8 @@ const {
     addBankAccountToBeneficiary
 } = require('./epagosService');
 const { processPendingPayments } = require('./paymentWorker');
+const sapService = require('./sapService');
+const { mapSapPaymentToEPagosDTO } = require('./mappers/paymentMapper');
 require('dotenv').config();
 
 const app = express();
@@ -146,6 +148,76 @@ app.post('/api/unit-test/beneficiaries/link', async (req, res) => {
         res.status(201).json({ success: true, message: "Solicitud de VINCULACIÓN enviada.", result });
     } catch (error) {
         res.status(500).json({ success: false, message: "Error al intentar vincular el beneficiario.", details: error.message });
+    }
+});
+
+app.get('/api/unit-test/sap/vendor-payments', async (req, res) => {
+    try {
+        const { filter, select, top, skip } = req.query;
+
+        await sapService.login();
+
+        const data = await sapService.listVendorPayments({
+            filter,
+            select,
+            top: Number(top),
+            skip: Number(skip)
+        });
+
+        await sapService.logout();
+
+        res.json({ count: data.length, data });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/api/unit-test/sap/vendor-payments-bp', async (req, res) => {
+    try {
+        const { filter, select, top, skip } = req.query;
+
+        await sapService.login();
+
+        const data = await sapService.listVendorPaymentsWithBP({
+            filter,
+            select,
+            top: Number(top) || 20,
+            skip: Number(skip) || 0
+        });
+
+        await sapService.logout();
+
+        res.json({
+            count: data.length,
+            data
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/api/unit-test/sap/vendor-payments-epagos', async (req, res) => {
+    try {
+        const { filter, top, skip } = req.query;
+
+        await sapService.login();
+
+        const payments = await sapService.listVendorPaymentsWithBP({
+            filter,
+            top: Number(top),
+            skip: Number(skip)
+        });
+
+        await sapService.logout();
+
+        const mapped = payments.map(mapSapPaymentToEPagosDTO);
+
+        res.json({
+            count: mapped.length,
+            data: mapped
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
     }
 });
 

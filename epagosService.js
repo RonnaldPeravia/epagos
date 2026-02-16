@@ -285,46 +285,46 @@ module.exports = {
     createPaymentOrder: async (paymentPayload) => {
         try {
             const authHeaders = await getCsrfToken();
+
+            // Forzamos el header 'Accept': 'application/json' para asegurar consistencia
             const response = await wsdmzClient.post('/Orders/', paymentPayload, {
-                headers: { 'x-csrf-token': authHeaders.csrfToken, 'Cookie': authHeaders.cookie, 'Content-Type': 'application/json' }
+                headers: {
+                    'x-csrf-token': authHeaders.csrfToken,
+                    'Cookie': authHeaders.cookie,
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                }
             });
 
-            // --- MANEJO ROBUSTO DE LA RESPUESTA ---
+            // DEBUG: Log para confirmar qué estamos recibiendo
+            // console.log('Respuesta recibida:', response.data);
 
-            // Si la respuesta no tiene cuerpo, asumimos éxito asíncrono.
-            if (!response.data) {
+            const responseData = response.data;
+
+            // --- MANEJO DE RESPUESTA JSON (según tu log de debug) ---
+            // La estructura recibida es { d: { OrderNr: "...", ... } }
+            if (responseData && responseData.d) {
+                const order = responseData.d;
+
                 return {
                     success: true,
-                    message: "Solicitud de orden de pago aceptada (asíncrona, sin cuerpo de respuesta).",
-                    details: { orderNumber: "PEND_ASYNC" }
+                    message: "Orden de pago creada exitosamente.",
+                    details: {
+                        orderNumber: order.OrderNr, // Aquí obtenemos el '000007013558'
+                        status: order.StatusName || 'Creada',
+                        totalAmount: order.NetAmountTotal
+                    }
                 };
             }
 
-            const parsedData = xmlParser.parse(response.data);
-            const orderProperties = parsedData.entry?.content?.['m:properties'];
-
-            // Si la respuesta no tiene la estructura esperada, también asumimos éxito asíncrono.
-            if (!orderProperties) {
-                return {
-                    success: true,
-                    message: "Solicitud de orden de pago aceptada (asíncrona, estructura de respuesta inesperada).",
-                    details: { orderNumber: "PEND_ASYNC" }
-                };
-            }
-
-            // Si la respuesta es síncrona y completa, extraemos los datos.
+            // --- FALLBACK PARA RESPUESTAS ASÍNCRONAS O VACÍAS ---
             return {
                 success: true,
-                message: "Orden de pago aceptada para procesamiento (síncrona).",
-                details: {
-                    orderNumber: orderProperties['d:OrderNr'],
-                    status: orderProperties['d:StatusName'],
-                    totalAmount: orderProperties['d:NetAmountTotal']
-                }
+                message: "Solicitud de orden de pago aceptada (procesamiento asíncrono).",
+                details: { orderNumber: "PEND_ASYNC" }
             };
 
         } catch (error) {
-            // El manejo de errores se mantiene igual, ya que es robusto.
             throw new Error(parseSapError(error));
         }
     },

@@ -135,7 +135,99 @@ const sapService = {
         } catch (error) {
             console.error(`Error actualizando Pago ${docEntry}:`, error.response?.data);
         }
-    }
+    },
+
+    /**
+     * Lista pagos de proveedor (solo lectura)
+     */
+    listVendorPayments: async (options = {}) => {
+        try {
+            const {
+                filter,
+                select = 'CardCode,DocEntry,DocNum,DocDate,TransferSum',
+                orderby = 'DocNum desc',
+                top = 20,
+                skip = 0
+            } = options;
+
+            const params = [];
+
+            // Combine enforced filters
+            const baseFilter = "DocType eq 'S' and TransferSum ne 0";
+            const finalFilter = filter
+                ? `${baseFilter} and (${filter})`
+                : baseFilter;
+
+            params.push(`$filter=${encodeURIComponent(finalFilter)}`);
+
+            if (select) params.push(`$select=${encodeURIComponent(select)}`);
+            if (orderby) params.push(`$orderby=${encodeURIComponent(orderby)}`);
+            if (top) params.push(`$top=${top}`);
+            if (skip) params.push(`$skip=${skip}`);
+
+            const query = params.length ? `?${params.join('&')}` : '';
+
+            const response = await sapClient.get(`/VendorPayments${query}`);
+
+            return response.data.value || [];
+        } catch (error) {
+            console.error(
+                '❌ Error listando pagos:',
+                error.response?.data || error.message
+            );
+            throw error;
+        }
+    },
+
+    /**
+  * Lista pagos con datos del proveedor (join en memoria)
+  */
+    listVendorPaymentsWithBP: async (options = {}) => {
+        const payments = await sapService.listVendorPayments(options);
+
+        if (!payments.length) return [];
+
+        // --- 1. CardCodes únicos ---
+        const uniqueCardCodes = [...new Set(
+            payments
+                .map(p => p.CardCode)
+                .filter(Boolean)
+        )];
+
+        // --- 2. Cache de proveedores ---
+        const bpCache = {};
+
+
+        for (const cardCode of uniqueCardCodes) {
+            bpCache[cardCode] = await sapService.getBusinessPartnerBasic(cardCode);
+        }
+
+        // --- 3. Enriquecer pagos ---
+        return payments.map(payment => ({
+            ...payment,
+            BusinessPartner: bpCache[payment.CardCode] || null
+        }));
+    },
+
+    /**
+ * Obtiene datos básicos del Socio de Negocio
+ */
+    getBusinessPartnerBasic: async (cardCode) => {
+        try {
+            const response = await sapClient.get(
+                `/BusinessPartners('${cardCode}')?$select=CardCode,CardName,FederalTaxID,BPBankAccounts`
+            );
+            return response.data;
+        } catch (error) {
+            console.error(
+                `❌ Error obteniendo BP ${cardCode}:`,
+                error.response?.data || error.message
+            );
+            throw error;
+        }
+    },
+
+
 };
 
 module.exports = sapService;
