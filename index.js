@@ -221,6 +221,26 @@ app.get('/api/unit-test/sap/vendor-payments-epagos', async (req, res) => {
     }
 });
 
+app.post('/api/unit-test/sap/update-vendor-payments-error/:docEntry', async (req, res) => {
+    try {
+        const { docEntry } = req.params;
+
+        await sapService.login();
+
+        await sapService.updatePaymentStatus(docEntry, req.body);
+
+        await sapService.logout();
+
+        res.json({
+            success: true,
+            message: `Vendor payment ${docEntry} updated`
+        });
+
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 /**
  * PRUEBA UNITARIA: Añade una cuenta a un beneficiario ya vinculado.
  * POST /api/unit-test/beneficiaries/:beneficiaryId/add-account
