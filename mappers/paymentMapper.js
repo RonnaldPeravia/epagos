@@ -47,6 +47,7 @@ function mapSapPaymentToEPagosDTO(payment) {
                 bankCtlKey === 'CA' ? '26' : '',
         DflAccount: bankAccount.AccountNo || '',
         MethodId: bank.method || '',
+        DocEntry: payment.DocEntry,
         DocNum: payment.DocNum,
         DocDate: payment.DocDate,
         Monto: payment.TransferSum
