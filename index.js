@@ -446,6 +446,89 @@ app.get('/api/payments/:orderNumber', async (req, res) => {
     }
 });
 
+app.get('/api/unit-test/sap/vendor-payments-epagos/validate', async (req, res) => {
+    try {
+
+        const { filter, top, skip } = req.query;
+
+        await sapService.login();
+
+        // 1️⃣ Obtener pagos crudos desde SAP
+        const payments = await sapService.listVendorPaymentsWithBP({
+            filter,
+            top: Number(top),
+            skip: Number(skip)
+        });
+
+        // 2️⃣ Mapear a tu DTO
+        const mapped = payments.map(mapSapPaymentToEPagosDTO);
+
+        const validPayments = [];
+        const paymentsWithError = [];
+
+        // 3️⃣ Separar pagos
+        for (const payment of mapped) {
+
+            const errorMessage = getBankDataError(payment);
+
+            if (errorMessage) {
+
+                paymentsWithError.push({
+                    DocEntry: payment.DocEntry,
+                    message: errorMessage
+                });
+
+            } else {
+                validPayments.push(payment);
+            }
+        }
+
+        // 4️⃣ Actualizar en SAP los que tienen error
+        for (const payment of paymentsWithError) {
+
+            await sapService.updatePaymentStatus(payment.DocEntry, {
+                U_BPD_status: "ERROR",
+                U_BPD_OrderNumber: "ERR-0",
+                U_BPD_message: payment.message
+            });
+        }
+
+        await sapService.logout();
+
+        res.json({
+            success: true,
+            total: mapped.length,
+            withError: paymentsWithError.length,
+            valid: validPayments.length,
+            data: validPayments
+        });
+
+    } catch (error) {
+
+        try { await sapService.logout(); } catch { }
+
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+function getBankDataError(payment) {
+
+    const missingFields = [];
+
+    if (!payment.BankId) missingFields.push("Banco");
+    if (!payment.DflAccount) missingFields.push("Cuenta");
+    if (!payment.AccountTypeId) missingFields.push("Tipo de Cuenta");
+
+    if (missingFields.length > 0) {
+        return `Los datos bancarios deben estar completos. Faltan: ${missingFields.join(", ")}`;
+    }
+
+    return null;
+}
+
 app.listen(PORT, () => {
     console.log(`Servidor escuchando en el puerto ${PORT}`);
     // console.log(`Cron Job programado: */30 * * * * *`);
