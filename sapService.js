@@ -153,7 +153,7 @@ const sapService = {
             const params = [];
 
             // Combine enforced filters
-            const baseFilter = "DocType eq 'S' and TransferSum ne 0 and U_BPD_OrderNumber eq null and DocDate ge '2026-02-17'";
+            const baseFilter = "DocType eq 'S' and TransferSum ne 0 and U_BPD_OrderNumber eq null and DocDate ge '2026-03-02'";
             const finalFilter = filter
                 ? `${baseFilter} and (${filter})`
                 : baseFilter;
