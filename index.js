@@ -16,6 +16,8 @@ const sapService = require('./sapService');
 const { mapSapPaymentToEPagosDTO } = require('./mappers/paymentMapper');
 require('dotenv').config();
 
+const { runVendorPaymentsTestFlow } = require('./flows/vendorPaymentsTestFlow');
+
 const app = express();
 app.use(express.json());
 
@@ -399,6 +401,34 @@ app.get('/api/beneficiaries/check', async (req, res) => {
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
+});
+
+app.get('/api/unit-test/sap/vendor-payments-epagos/run-flow', async (req, res) => {
+
+    try {
+
+        const { filter, top, skip } = req.query;
+
+        const result = await runVendorPaymentsTestFlow({
+            filter,
+            top,
+            skip
+        });
+
+        res.json({
+            success: true,
+            ...result
+        });
+
+    } catch (error) {
+
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+
+    }
+
 });
 
 /**
