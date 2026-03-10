@@ -10,7 +10,7 @@ function mapToLinkBeneficiaryPayload(payment, beneficiaryId) {
 
     const payload = buildZbuba6Base(payment);
 
-    payload.BusinessPartner2Id = beneficiaryId;
+    payload.BusinessPartner2Id = String(beneficiaryId); // ← forzar string
 
     return payload;
 }

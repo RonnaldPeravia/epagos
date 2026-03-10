@@ -121,9 +121,22 @@ function parseSapError(error) {
 }
 
 async function addBeneficiaryToCompany(beneficiaryPayload) {
+
+    console.log('TYPEOF PAYLOAD:', typeof beneficiaryPayload); // ← "string" o "object"
+    console.log('RAW PAYLOAD:', beneficiaryPayload);
     console.log('Ejecutando addBeneficiaryToCompany con Payload...', beneficiaryPayload);
     try {
         const authHeaders = await getCsrfToken();
+
+        // ← TEMPORAL: ver headers exactos que se envían
+        console.log("HEADERS BEING SENT:", {
+            'Content-Type': 'application/json;charset=utf-8',
+            'Accept': 'application/json',
+            'x-csrf-token': authHeaders.csrfToken,
+            'Cookie': authHeaders.cookie ? 'present' : 'MISSING'
+        });
+
+
         const data = JSON.stringify(beneficiaryPayload);
 
         const response = await wsdmzClient.post('/Relationships/', data, {
@@ -165,6 +178,8 @@ async function addBeneficiaryToCompany(beneficiaryPayload) {
         };
 
     } catch (error) {
+        console.log("RAW ERROR RESPONSE:", JSON.stringify(error.response?.data, null, 2));
+        console.log("RAW ERROR STATUS:", error.response?.status);
         throw new Error(parseSapError(error));
     }
 }

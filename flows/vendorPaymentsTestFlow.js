@@ -1,6 +1,7 @@
 const sapService = require('../sapService');
 const { mapSapPaymentToEPagosDTO } = require('../mappers/paymentMapper');
-const { findGlobalBeneficiary } = require('../epagosService');
+const { mapToLinkBeneficiaryPayload } = require('../mappers/linkBeneficiaryMapper');
+const { findGlobalBeneficiary, createBeneficiary } = require('../epagosService');
 const { logStep } = require('../utils/logger');
 
 function getBankDataError(payment) {
@@ -12,6 +13,28 @@ function getBankDataError(payment) {
         return `Los datos bancarios deben estar completos. Faltan: ${missingFields.join(", ")}`;
     }
     return null;
+}
+
+function isAlreadyLinkedError(error) {
+    const status = error.response?.status;
+    const rawData = error.response?.data;
+
+    // Buscar en errordetails el código específico de SAP
+    const errorDetails = rawData?.error?.innererror?.errordetails;
+    if (errorDetails) {
+        const details = Array.isArray(errorDetails) ? errorDetails : [errorDetails];
+        const alreadyExists = details.some(d => d.code === 'ZCMG_RI');
+        if (alreadyExists) return true;
+    }
+
+    // Fallbacks genéricos
+    const message = rawData?.error?.message?.value || error.message || '';
+    return (
+        status === 409 ||
+        message.toLowerCase().includes('ya existe este tipo de relación') ||
+        message.toLowerCase().includes('already linked') ||
+        message.toLowerCase().includes('already exists')
+    );
 }
 
 async function runVendorPaymentsTestFlow({ filter, top, skip }) {
@@ -127,7 +150,8 @@ async function runVendorPaymentsTestFlow({ filter, top, skip }) {
             const cacheKey = `${payment.TipoDocumento}-${payment.LicTradNum}`;
             let beneficiaryId = beneficiaryCache[cacheKey];
 
-            if (!beneficiaryId) {
+            if (beneficiaryId === undefined) {
+
                 logStep("STEP 6", "Finding global beneficiary", {
                     DocEntry: payment.DocEntry,
                     TipoDocumento: payment.TipoDocumento,
@@ -139,7 +163,9 @@ async function runVendorPaymentsTestFlow({ filter, top, skip }) {
                     payment.LicTradNum
                 );
 
-                beneficiaryCache[cacheKey] = beneficiaryId;
+                // Cachear también null para no repetir llamadas sin resultado
+                beneficiaryCache[cacheKey] = beneficiaryId ? String(beneficiaryId) : null;
+
             } else {
                 logStep("STEP 6 CACHE", "Beneficiary found in cache", {
                     DocEntry: payment.DocEntry,
@@ -153,7 +179,7 @@ async function runVendorPaymentsTestFlow({ filter, top, skip }) {
             });
 
             beneficiaryResults.push({
-                payment,                          // <-- guardamos el payment completo para el paso siguiente
+                payment,
                 DocEntry: payment.DocEntry,
                 beneficiaryId: beneficiaryId || null
             });
@@ -161,46 +187,105 @@ async function runVendorPaymentsTestFlow({ filter, top, skip }) {
 
 
         // =============================
-        // STEP 7 UPDATE BP SYNC STATUS
+        // STEP 7 LINK BENEFICIARY & UPDATE BP SYNC STATUS
         // =============================
 
-        logStep("STEP 7", "Updating BusinessPartners U_BPD_Synced field");
+        logStep("STEP 7", "Linking beneficiaries and updating U_BPD_Synced");
 
-        // Evitar actualizar el mismo CardCode más de una vez
         const syncedCardCodes = new Set();
 
         for (const result of beneficiaryResults) {
 
-            const cardCode = result.payment.CardCode;
+            const { payment, DocEntry, beneficiaryId } = result;
+            const cardCode = payment.CardCode;
 
-            if (!cardCode || syncedCardCodes.has(cardCode)) {
-                logStep("STEP 7 SKIP", "BP already updated or CardCode missing", {
-                    DocEntry: result.DocEntry,
-                    cardCode: cardCode || null
+            // — Skip si ya fue procesado en esta misma ejecución
+            if (syncedCardCodes.has(cardCode)) {
+                logStep("STEP 7 SKIP", "CardCode already processed in this run", {
+                    DocEntry,
+                    cardCode
                 });
                 continue;
             }
 
-            const syncValue = result.beneficiaryId ? 'Y' : 'N';
+            // — Skip si SAP ya lo tiene como sincronizado
+            const alreadySynced = payment.BusinessPartner?.U_BPD_Synced === 'Y';
 
-            logStep("STEP 7", "Updating BP sync status", {
-                DocEntry: result.DocEntry,
-                cardCode,
-                U_BPD_Synced: syncValue
-            });
+            if (alreadySynced) {
+                logStep("STEP 7 SKIP", "BP already synced in SAP (U_BPD_Synced = Y)", {
+                    DocEntry,
+                    cardCode
+                });
+                syncedCardCodes.add(cardCode);
+                continue;
+            }
 
-            await sapService.updateBPSyncStatus(cardCode, syncValue);
+            // — Sin beneficiario global → marcar como N
+            if (!beneficiaryId) {
+                logStep("STEP 7", "No global beneficiary found, marking BP as N", {
+                    DocEntry,
+                    cardCode
+                });
 
+                await sapService.updateBPSyncStatus(cardCode, 'N');
+                syncedCardCodes.add(cardCode);
+
+                logStep("STEP 7 RESULT", "U_BPD_Synced updated to N", { cardCode });
+                continue;
+            }
+
+            // — Beneficiario encontrado → intentar vinculación con createBeneficiary
+            try {
+
+                const linkPayload = mapToLinkBeneficiaryPayload(payment, beneficiaryId);
+
+                logStep("STEP 7 LINK", "Sending link beneficiary request", {
+                    DocEntry,
+                    cardCode,
+                    beneficiaryId
+                });
+
+                logStep("STEP 7 LINK PAYLOAD", "Payload being sent to createBeneficiary", {
+                    DocEntry,
+                    cardCode,
+                    payload: mapToLinkBeneficiaryPayload(payment, beneficiaryId)
+                });
+
+                await createBeneficiary(linkPayload);
+
+                logStep("STEP 7 LINK RESULT", "Beneficiary linked successfully", {
+                    DocEntry,
+                    cardCode
+                });
+
+            } catch (linkError) {
+
+                const alreadyLinked = isAlreadyLinkedError(linkError);
+
+                if (!alreadyLinked) {
+                    logStep("STEP 7 LINK ERROR", "Failed to link beneficiary, skipping BP sync update", {
+                        DocEntry,
+                        cardCode,
+                        error: linkError.message
+                    });
+                    continue; // Error real → no actualizar Synced
+                }
+
+                logStep("STEP 7 LINK ALREADY", "Beneficiary was already linked", {
+                    DocEntry,
+                    cardCode
+                });
+            }
+
+            // — Llegar aquí = vinculado OK o ya estaba vinculado → actualizar Y
+            await sapService.updateBPSyncStatus(cardCode, 'Y');
             syncedCardCodes.add(cardCode);
 
-            logStep("STEP 7 RESULT", "BP sync status updated", {
-                cardCode,
-                U_BPD_Synced: syncValue
-            });
+            logStep("STEP 7 RESULT", "U_BPD_Synced updated to Y", { cardCode });
         }
 
-        logStep("STEP 7 SUMMARY", "BP sync update complete", {
-            totalUpdated: syncedCardCodes.size
+        logStep("STEP 7 SUMMARY", "BP sync step complete", {
+            totalProcessed: syncedCardCodes.size
         });
 
 
