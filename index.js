@@ -65,11 +65,6 @@ app.post('/api/trigger-sync', async (req, res) => {
 // Función de utilidad para esperar
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-// ==========================================================
-// ========== ENDPOINTS DE PRUEBAS UNITARIAS ================
-// ==========================================================
-console.log("Endpoints de pruebas unitarias activos en /api/unit-test/");
-
 // --- Grupo 1: BENEFICIARIOS ---
 
 // 1. Consulta Global de Beneficiario
