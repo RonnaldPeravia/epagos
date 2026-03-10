@@ -28,21 +28,21 @@ let isProcessing = false;
 
 // --- CRON JOB ---
 // Se ejecuta cada 5 minutos
-cron.schedule('*/30 59 * * * *', async () => {
-    if (isProcessing) {
-        console.log('⚠️ El ciclo anterior aún está corriendo. Saltando ejecución.');
-        return;
-    }
+// cron.schedule('*/30 59 * * * *', async () => {
+//     if (isProcessing) {
+//         console.log('⚠️ El ciclo anterior aún está corriendo. Saltando ejecución.');
+//         return;
+//     }
 
-    isProcessing = true;
-    try {
-        await processPendingPayments();
-    } catch (error) {
-        console.error('Error no controlado en Cron:', error);
-    } finally {
-        isProcessing = false;
-    }
-});
+//     isProcessing = true;
+//     try {
+//         await processPendingPayments();
+//     } catch (error) {
+//         console.error('Error no controlado en Cron:', error);
+//     } finally {
+//         isProcessing = false;
+//     }
+// });
 
 // --- RUTAS API (Para pruebas manuales o UAT) ---
 app.get('/', (req, res) => {
