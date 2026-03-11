@@ -147,6 +147,25 @@ async function runVendorPaymentsTestFlow({ filter, top, skip }) {
 
         for (const payment of validPayments) {
 
+            // — Skip búsqueda global si ya está sincronizado en SAP
+
+            const alreadySynced = payment.U_BPD_Synced === 'Y';
+
+            if (alreadySynced) {
+                logStep("STEP 6 SKIP", "BP already synced, skipping global beneficiary lookup", {
+                    DocEntry: payment.DocEntry,
+                    cardCode: payment.CardCode
+                });
+
+                beneficiaryResults.push({
+                    payment,
+                    DocEntry: payment.DocEntry,
+                    beneficiaryId: null // no necesario, STEP 7 lo saltará también
+                });
+
+                continue;
+            }
+
             const cacheKey = `${payment.TipoDocumento}-${payment.LicTradNum}`;
             let beneficiaryId = beneficiaryCache[cacheKey];
 
@@ -163,7 +182,6 @@ async function runVendorPaymentsTestFlow({ filter, top, skip }) {
                     payment.LicTradNum
                 );
 
-                // Cachear también null para no repetir llamadas sin resultado
                 beneficiaryCache[cacheKey] = beneficiaryId ? String(beneficiaryId) : null;
 
             } else {
@@ -181,7 +199,7 @@ async function runVendorPaymentsTestFlow({ filter, top, skip }) {
             beneficiaryResults.push({
                 payment,
                 DocEntry: payment.DocEntry,
-                beneficiaryId: beneficiaryId || null
+                beneficiaryId: beneficiaryId ? String(beneficiaryId) : null
             });
         }
 
@@ -209,7 +227,7 @@ async function runVendorPaymentsTestFlow({ filter, top, skip }) {
             }
 
             // — Skip si SAP ya lo tiene como sincronizado
-            const alreadySynced = payment.BusinessPartner?.U_BPD_Synced === 'Y';
+            const alreadySynced = payment.U_BPD_Synced === 'Y';
 
             if (alreadySynced) {
                 logStep("STEP 7 SKIP", "BP already synced in SAP (U_BPD_Synced = Y)", {

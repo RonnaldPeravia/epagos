@@ -215,7 +215,7 @@ const sapService = {
     getBusinessPartnerBasic: async (cardCode) => {
         try {
             const response = await sapClient.get(
-                `/BusinessPartners('${cardCode}')?$select=CardCode,CardName,FederalTaxID,BPBankAccounts`
+                `/BusinessPartners('${cardCode}')?$select=CardCode,CardName,FederalTaxID,U_BPD_Synced,BPBankAccounts`
             );
             return response.data;
         } catch (error) {

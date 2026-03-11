@@ -40,6 +40,7 @@ function mapSapPaymentToEPagosDTO(payment) {
         BusinessPartnerTypeId: isCompany ? '1' : '2',
         CardCode: payment.CardCode,
         CardName: bp.CardName || '',
+        U_BPD_Synced: bp.U_BPD_Synced || '',
         BankId: bank.id || '',
         NombreBancoEPagos: bank.name || '',
         AccountTypeId:
