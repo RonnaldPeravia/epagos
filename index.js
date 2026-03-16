@@ -27,22 +27,28 @@ const PORT = process.env.PORT || 3000;
 let isProcessing = false;
 
 // --- CRON JOB ---
-// Se ejecuta cada 5 minutos
-// cron.schedule('*/30 59 * * * *', async () => {
-//     if (isProcessing) {
-//         console.log('⚠️ El ciclo anterior aún está corriendo. Saltando ejecución.');
-//         return;
-//     }
+// Se ejecuta cada minuto
+cron.schedule('0 * * * * *', async () => {
+    if (isProcessing) {
+        console.log('⚠️ El ciclo anterior aún está corriendo. Saltando ejecución.');
+        return;
+    }
 
-//     isProcessing = true;
-//     try {
-//         await processPendingPayments();
-//     } catch (error) {
-//         console.error('Error no controlado en Cron:', error);
-//     } finally {
-//         isProcessing = false;
-//     }
-// });
+    isProcessing = true;
+    try {
+        const result = await runVendorPaymentsTestFlow({
+            filter: null, 
+            top: null,
+            skip: null
+        });
+
+        console.log('Resultado:', result);
+    } catch (error) {
+        console.error('Error no controlado en Cron:', error);
+    } finally {
+        isProcessing = false;
+    }
+});
 
 // --- RUTAS API (Para pruebas manuales o UAT) ---
 app.get('/', (req, res) => {
