@@ -121,7 +121,7 @@ function parseSapError(error) {
 }
 
 async function addBeneficiaryToCompany(beneficiaryPayload) {
-    console.log('Ejecutando addBeneficiaryToCompany con Payload...', beneficiaryPayload);
+    console.log('Ejecutando addBeneficiaryToCompany con Payload...', JSON.stringify(beneficiaryPayload));
     try {
         const authHeaders = await getCsrfToken();
 
